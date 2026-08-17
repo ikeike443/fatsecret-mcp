@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Unit + integration tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: E2E tests (real HTTP server, no external secrets required)
+        run: npm run test:e2e
