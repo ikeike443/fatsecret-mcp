@@ -12,9 +12,3 @@ If the review finds nothing, stop after step 1 — no fix subagent needed.
 This loop is the default when nothing else is specified. If the user gives explicit instructions about a specific self-opened PR — e.g. "just review this one, don't fix it yet", "hold off on fixing", or any other specific ask — those instructions win for that PR, overriding the automatic loop (including its automatic fix-and-push step), even though the assistant opened the PR itself.
 
 When asked to review a PR that already existed before the current turn/request (e.g. reviewing someone else's PR, or a plain "review PR #N" request for a PR opened in an earlier session or task — as opposed to one the assistant is opening as part of the current task), post the review with findings first, as a separate step from fixing them. Don't fix-then-report in the same motion — it reads as unclear/backwards about what's already done vs. still open. Wait for the user (or a follow-up instruction) before pushing fixes for what the review found.
-
-## FatSecret-specific notes
-
-- This server talks to FatSecret using two unrelated OAuth flows (OAuth 2.0 Client Credentials for search, OAuth 1.0a 3-legged for the user's own diary/weight/exercise data) — see README's "Two authentication layers" section before touching `lib/fatsecret/*`. Don't conflate `FATSECRET_CLIENT_ID/SECRET` (OAuth2) with `FATSECRET_CONSUMER_KEY/SECRET` (OAuth1) — they are different credential pairs from the same FatSecret app.
-- Several response/param shapes in `lib/fatsecret/exercise.ts`, `lib/fatsecret/weight.ts`, and `lib/fatsecret/foods.ts`'s barcode lookup are flagged inline as unverified against a real FatSecret account (see README's "What's unverified" section) — when you get real API access, verify and fix these before treating them as correct, and update the corresponding unit tests to match.
-- Never commit real FatSecret or MCP credentials, and never run the manual-verification checklist (README) in CI.
