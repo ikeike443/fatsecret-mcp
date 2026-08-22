@@ -9,10 +9,16 @@
 // exercise_name: "Google Health Connect", minutes: "1440", calories:
 // "1655"}, i.e. a full day's aggregated activity) has NO exercise_entry_id
 // and NO date_int at all — those keys are simply absent, not present-as-
-// null. Every field below is therefore optional and defaults to null
-// rather than assumed-present, and the full raw entry is kept under `raw`
-// so nothing is silently lost for entry shapes this module doesn't
-// otherwise model. It's still unconfirmed whether a *manually*-logged
+// null. exercise_entry_id, date_int, calories, and minutes are therefore
+// all optional and default to null rather than assumed-present (minutes
+// was observed present on every real entry so far, but is guarded the same
+// way since nothing in the API contract guarantees it always will be —
+// Number(undefined) would otherwise silently become NaN, which
+// JSON-serializes indistinguishably from a real null). exercise_name is
+// still required/non-optional: every observed real entry, including the
+// connected-health-app one above, always had a name. The full raw entry is
+// kept under `raw` so nothing is silently lost for entry shapes this
+// module doesn't otherwise model. It's still unconfirmed whether a *manually*-logged
 // exercise (via the FatSecret app, not a connected health app) has an id/
 // date the same way food_entries.get's entries do — if you log one
 // manually and re-check, update this comment with what you find.
@@ -33,7 +39,7 @@ interface RawExerciseEntry {
   exercise_entry_id?: string;
   exercise_id?: string;
   exercise_name: string;
-  minutes: string;
+  minutes?: string;
   calories?: string;
   date_int?: string;
   [key: string]: unknown;
@@ -54,7 +60,7 @@ export async function getExerciseDiary(date?: string) {
       exerciseEntryId: e.exercise_entry_id ?? null,
       exerciseId: e.exercise_id ?? null,
       name: e.exercise_name,
-      minutes: Number(e.minutes),
+      minutes: e.minutes !== undefined ? Number(e.minutes) : null,
       calories: e.calories ? Number(e.calories) : null,
       dateDaysSinceEpoch: e.date_int !== undefined ? Number(e.date_int) : null,
       raw: e,

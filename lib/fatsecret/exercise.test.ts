@@ -100,6 +100,41 @@ describe("getExerciseDiary", () => {
       },
     ]);
   });
+
+  // Regression test: minutes is guarded the same way as exercise_entry_id/
+  // date_int/calories. Before this fix, an entry missing `minutes` would
+  // hit Number(undefined), silently producing NaN — which JSON-serializes
+  // indistinguishably from a real null. This confirms a missing `minutes`
+  // comes back as an explicit `null` instead.
+  it("handles an entry with no minutes without producing NaN", async () => {
+    const rawEntry = {
+      exercise_entry_id: "2",
+      exercise_id: "50",
+      exercise_name: "Running",
+      calories: "300",
+      date_int: "20678",
+    };
+    stubApi(
+      () =>
+        new Response(
+          JSON.stringify({ exercise_entries: { exercise_entry: rawEntry } }),
+          { status: 200 }
+        )
+    );
+    const diary = await getExerciseDiary("2026-08-17");
+    expect(diary.entries).toEqual([
+      {
+        exerciseEntryId: "2",
+        exerciseId: "50",
+        name: "Running",
+        minutes: null,
+        calories: 300,
+        dateDaysSinceEpoch: 20678,
+        raw: rawEntry,
+      },
+    ]);
+    expect(Number.isNaN(diary.entries[0].minutes)).toBe(false);
+  });
 });
 
 describe("createExerciseEntry", () => {

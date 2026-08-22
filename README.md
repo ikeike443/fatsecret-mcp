@@ -11,7 +11,7 @@ A personal remote MCP (Model Context Protocol) server that lets Claude search [F
 ## Status
 
 - **Search (Phase 2)**: implemented — `search_foods`, `get_food_detail`, `search_recipes`, `get_recipe_detail`, `find_food_by_barcode`. No FatSecret user authorization needed; only the OAuth 2.0 Client ID/Secret from FatSecret's developer console.
-- **Diary/weight/exercise/profile (Phase 4)**: implemented, but **unverified against a real FatSecret account** — no FatSecret API registration existed while this was built (see "What's unverified" below). Confirm each method's exact field names against a real account before relying on it, and update the code/tests if anything's off.
+- **Diary/weight/exercise/profile (Phase 4)**: implemented, and **partially verified against a real FatSecret account** — `get_profile`, `get_food_diary`, and `get_exercise_diary` are now confirmed live; `create_exercise_entry`, `weight.update`, and `find_food_by_barcode` are still unverified best-effort reconstructions (see "What's unverified" below for the full breakdown).
 - **3-legged OAuth1 setup script (Phase 3)**: implemented (`scripts/fatsecret-oauth-setup.ts`), not yet run against a real FatSecret account.
 
 ## Two authentication layers
