@@ -1,11 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ProxyAgent } from "undici";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import {
   getAppAccessToken,
   fatsecretAppRequest,
   _resetAppAccessTokenCacheForTests,
   _resetProxyDispatcherForTests,
 } from "./appAuth";
+
+// appAuth.ts only routes through undici's own fetch (as opposed to the
+// plain global fetch every other test in this file stubs via
+// vi.stubGlobal) when a proxy dispatcher is actually attached — see its
+// fetchWithDiagnostics()/import comments for why. So only the handful of
+// tests that configure FIXIE_URL need this mock; everything else is
+// unaffected by it (the mock is simply never called).
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -16,6 +27,7 @@ beforeEach(() => {
   delete process.env.FIXIE_URL;
   _resetAppAccessTokenCacheForTests();
   _resetProxyDispatcherForTests();
+  vi.mocked(undiciFetch).mockReset();
 });
 
 afterEach(() => {
@@ -192,12 +204,16 @@ describe("FIXIE_URL proxying", () => {
   it("attaches a ProxyAgent dispatcher to both the token request and the API request when FIXIE_URL is set", async () => {
     process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
     const capturedInits: (RequestInit & { dispatcher?: unknown })[] = [];
-    const fetchMock = vi.fn(async (url: string, init: RequestInit & { dispatcher?: unknown }) => {
-      capturedInits.push(init);
-      if (url === "https://oauth.fatsecret.com/connect/token") return tokenResponse();
-      return new Response(JSON.stringify({ foods: { food: [] } }), { status: 200 });
+    // A dispatcher is attached, so appAuth.ts routes through undici's own
+    // fetch, not the global one — see the vi.mock("undici", ...) above.
+    vi.mocked(undiciFetch).mockImplementation(async (url, init) => {
+      capturedInits.push(init as RequestInit & { dispatcher?: unknown });
+      const body =
+        url === "https://oauth.fatsecret.com/connect/token"
+          ? tokenResponse()
+          : new Response(JSON.stringify({ foods: { food: [] } }), { status: 200 });
+      return body as unknown as Awaited<ReturnType<typeof undiciFetch>>;
     });
-    vi.stubGlobal("fetch", fetchMock);
 
     await fatsecretAppRequest("foods.search", { search_expression: "apple" });
 
@@ -212,12 +228,11 @@ describe("FIXIE_URL proxying", () => {
   it("rebuilds the dispatcher if FIXIE_URL changes between calls", async () => {
     process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
     const capturedInits: (RequestInit & { dispatcher?: unknown })[] = [];
-    const fetchMock = vi.fn(async (url: string, init: RequestInit & { dispatcher?: unknown }) => {
+    vi.mocked(undiciFetch).mockImplementation(async (url, init) => {
       expect(url).toBe("https://oauth.fatsecret.com/connect/token");
-      capturedInits.push(init);
-      return tokenResponse();
+      capturedInits.push(init as RequestInit & { dispatcher?: unknown });
+      return tokenResponse() as unknown as Awaited<ReturnType<typeof undiciFetch>>;
     });
-    vi.stubGlobal("fetch", fetchMock);
     await getAppAccessToken();
     const firstDispatcher = capturedInits[0].dispatcher;
 
@@ -288,8 +303,14 @@ describe("network-level fetch error diagnostics", () => {
     expect(withoutProxy).toBeInstanceOf(Error);
     expect((withoutProxy as Error).message).not.toMatch(/FIXIE_URL/);
 
+    // A dispatcher is attached from here on, so appAuth.ts routes through
+    // undici's own fetch, not the global one just stubbed above — see the
+    // vi.mock("undici", ...) at the top of this file.
     process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
     _resetProxyDispatcherForTests();
+    vi.mocked(undiciFetch).mockImplementation(async () => {
+      throw new TypeError("fetch failed");
+    });
     await expect(getAppAccessToken()).rejects.toThrow(/FIXIE_URL/);
   });
 

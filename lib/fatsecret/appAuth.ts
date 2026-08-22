@@ -23,7 +23,23 @@
 // FIXIE_URL is set — see proxyDispatcher() below. Locally, where the
 // machine's own IP is what you allowlist directly, just leave FIXIE_URL
 // unset.
-import { ProxyAgent } from "undici";
+//
+// IMPORTANT: both the ProxyAgent *and* the fetch() call it's passed to must
+// come from this same `undici` import — never Node's own global `fetch`.
+// Confirmed against a real deployment: passing this package's ProxyAgent as
+// a per-request `dispatcher` to the *global* fetch throws `TypeError: fetch
+// failed -> invalid onRequestStart method (UND_ERR_INVALID_ARG)`. Node
+// bundles its own internal copy of undici to power global fetch, and its
+// dispatcher/handler interface isn't guaranteed to match whatever version
+// of the `undici` npm package is installed here (undici 8.x refactored
+// that interface in a way that's incompatible with the 6.x line Node 22
+// bundles internally, per github.com/nodejs/undici#3856 and related
+// issues) — a mismatch pinning package.json's undici version to Node's
+// bundled one would just as easily break again on a future Node upgrade.
+// Using undici's own exported `fetch` sidesteps the whole class of bug:
+// dispatcher and fetch are then guaranteed to be the exact same module
+// instance, regardless of version.
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 const TOKEN_URL = "https://oauth.fatsecret.com/connect/token";
 
@@ -91,12 +107,30 @@ function describeErrorChain(err: unknown, depth = 0): string {
  * likely cause of this in production (see README's "Fixed outbound IP for
  * Vercel"). HTTP-level errors (non-2xx responses) are unaffected — those
  * already carry a real status/body and are handled by each caller.
+ *
+ * Only switches to undici's own fetch when a dispatcher is actually
+ * attached (see the import comment above for why that pairing matters) —
+ * every other call keeps using the plain global `fetch`, unchanged. This
+ * keeps the vast majority of this module's behavior (and every test that
+ * doesn't configure FIXIE_URL) exactly as it was before proxying existed;
+ * only the FIXIE_URL-configured path takes on the undici-fetch requirement.
  */
 async function fetchWithDiagnostics(
   url: string,
   init: FetchInitWithDispatcher
 ): Promise<Response> {
   try {
+    if (init.dispatcher) {
+      // undici ships its own RequestInit/Response types (structurally
+      // close to, but not identical to, lib.dom.d.ts's — e.g. its BodyInit
+      // admits a Node ReadableStream) since it's a separate implementation
+      // of the same Fetch standard, not a re-export of the DOM types. Both
+      // callers only touch .ok/.status/.text()/.json(), which both share.
+      return (await undiciFetch(
+        url,
+        init as Parameters<typeof undiciFetch>[1]
+      )) as unknown as Response;
+    }
     return await fetch(url, init);
   } catch (err) {
     const detail = describeErrorChain(err);
