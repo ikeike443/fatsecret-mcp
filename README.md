@@ -207,8 +207,9 @@ Set these in the Vercel project's Environment Variables (Production + Preview). 
 1. `vercel link`
 2. `vercel env add FATSECRET_CLIENT_ID` (repeat for every variable in the table above that you have a value for — at minimum `FATSECRET_CLIENT_ID`/`SECRET`, `MCP_BEARER_TOKEN`, `OAUTH_CLIENT_ID`/`SECRET`; add `FIXIE_URL` per "Fixed outbound IP for Vercel" above — required, not optional, in practice; add the `FATSECRET_CONSUMER_*`/`FATSECRET_ACCESS_TOKEN*` pair once you've run the OAuth1 setup script)
 3. Connect this GitHub repo in the Vercel dashboard for auto-deploy on push to `main`, or run `vercel --prod` manually.
-4. Note the deployed URL (check Project → Settings → Domains — this project's production URL turned out to be the unclaimed `https://fatsecret-mcp.vercel.app`, but that's Vercel's shared namespace, so don't assume it'll be free for a fork).
-5. **Allowlist Fixie's fixed IP** in the FatSecret developer console (see "Fixed outbound IP for Vercel" above) — this is the step most likely to bite in production, since without it `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`find_food_by_barcode` all fail with `FatSecret API error 21`.
+4. **Set the Vercel project's Node.js Version to 22.19 or newer** (Project → Settings → General → Node.js Version, or wherever the current Vercel dashboard puts it) *before* deploying. This server's `undici@8` dependency (used for the Fixie proxy — see "Fixed outbound IP for Vercel" above) declares `"engines": {"node": ">=22.19.0"}`, and `package.json`'s own `engines` field here documents the same requirement — but neither one actually enforces anything on Vercel by itself, so a project still pinned to an older Node version (e.g. 20.x) will deploy "successfully" and then fail at runtime.
+5. Note the deployed URL (check Project → Settings → Domains — this project's production URL turned out to be the unclaimed `https://fatsecret-mcp.vercel.app`, but that's Vercel's shared namespace, so don't assume it'll be free for a fork).
+6. **Allowlist Fixie's fixed IP** in the FatSecret developer console (see "Fixed outbound IP for Vercel" above) — this is the step most likely to bite in production, since without it `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`find_food_by_barcode` all fail with `FatSecret API error 21`.
 
 ## Connect to Claude
 

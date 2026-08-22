@@ -39,6 +39,12 @@ function proxyDispatcher(): ProxyAgent | undefined {
   const url = process.env.FIXIE_URL;
   if (!url) return undefined;
   if (cachedDispatcher && cachedDispatcherUrl === url) return cachedDispatcher;
+  // FIXIE_URL changing mid-process is not expected in practice (env vars
+  // don't change mid-lifetime on Vercel), but if it ever does, close the
+  // outgoing dispatcher's connection pool instead of leaking it. Deliberately
+  // fire-and-forget: proxyDispatcher() stays synchronous so this fix doesn't
+  // ripple into withOptionalProxy() and its callers becoming async.
+  cachedDispatcher?.close().catch(() => {});
   cachedDispatcher = new ProxyAgent(url);
   cachedDispatcherUrl = url;
   return cachedDispatcher;

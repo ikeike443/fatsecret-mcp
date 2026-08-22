@@ -180,7 +180,12 @@ describe("FIXIE_URL proxying", () => {
 
     expect(capturedInits).toHaveLength(2);
     for (const init of capturedInits) {
-      expect(init.dispatcher).toBeUndefined();
+      // Not just `expect(init.dispatcher).toBeUndefined()` — that would pass
+      // identically whether `dispatcher` is absent or present-but-undefined,
+      // and the latter is exactly the regression this guards against (some
+      // dispatcher-consuming HTTP clients treat an explicitly-present
+      // `undefined` differently from a missing key).
+      expect("dispatcher" in init).toBe(false);
     }
   });
 
