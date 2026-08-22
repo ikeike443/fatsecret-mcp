@@ -38,17 +38,21 @@ export interface SecurityEvent {
 }
 
 /**
- * Best-effort client IP extraction. Vercel sets x-forwarded-for on every
- * request; this is not spoof-proof against a client setting its own
- * x-forwarded-for header directly (Vercel's edge overwrites/appends rather
- * than trusting the client blindly, but treat this as "best available
- * signal for triage", not a security control in itself).
+ * Best-effort client IP extraction. Standard X-Forwarded-For semantics: each
+ * proxy hop APPENDS the IP it saw the request come from, so the header reads
+ * `client-supplied-value, ..., ip-as-seen-by-the-last-hop`. On Vercel,
+ * Vercel's edge is the last hop before this app, so it appends the actual
+ * connecting IP as the LAST entry — any earlier entry (including a fully
+ * fabricated one) could have been set directly by the client. That makes the
+ * LAST entry the most trustworthy one available to us; still treat this as
+ * "best available signal for triage", not a security control in itself.
  */
 export function getClientIp(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");
   if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = xff.split(",");
+    const last = parts[parts.length - 1]?.trim();
+    if (last) return last;
   }
   return req.headers.get("x-real-ip") ?? "unknown";
 }
@@ -104,6 +108,31 @@ export function scheduleSecurityAlert(e: SecurityEvent): void {
 }
 
 /**
+ * Base SecurityEvent keys, used to find the caller-supplied "extra" fields
+ * (clientId, redirectUri, responseType, grantType, ...) so they can be
+ * summarized into the alert text below. These extra fields are always
+ * non-secret request identifiers (client ids, redirect URIs, response
+ * types) — never a presented token/secret value — so it's safe to render
+ * them directly; this is not a place to spread arbitrary future fields
+ * blindly, just these specific known-safe identifiers.
+ */
+const BASE_EVENT_KEYS = new Set([
+  "event",
+  "reason",
+  "ip",
+  "userAgent",
+  "path",
+  "time",
+]);
+
+function formatExtraFields(e: SecurityEvent): string {
+  return Object.keys(e)
+    .filter((key) => !BASE_EVENT_KEYS.has(key))
+    .map((key) => `${key}=${JSON.stringify(e[key])}`)
+    .join(" ");
+}
+
+/**
  * Best-effort webhook alert. Prefer scheduleSecurityAlert() (above) from
  * callers — call this directly only if you already have your own reason to
  * control the awaiting/scheduling yourself.
@@ -113,6 +142,8 @@ export async function sendSecurityAlert(e: SecurityEvent): Promise<void> {
   if (!webhookUrl) return;
 
   try {
+    const extraFields = formatExtraFields(e);
+    const extraSuffix = extraFields ? ` ${extraFields}` : "";
     await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -120,7 +151,7 @@ export async function sendSecurityAlert(e: SecurityEvent): Promise<void> {
       // field. If you point this at some other webhook provider, adjust
       // the body shape to match what it expects.
       body: JSON.stringify({
-        text: `🚨 [${e.event}] ${e.reason} — ip=${e.ip} path=${e.path} ua="${e.userAgent}" at ${e.time}`,
+        text: `🚨 [${e.event}] ${e.reason} — ip=${e.ip} path=${e.path} ua="${e.userAgent}"${extraSuffix} at ${e.time}`,
       }),
       signal: AbortSignal.timeout(3000),
     });
@@ -138,4 +169,22 @@ export async function sendSecurityAlert(e: SecurityEvent): Promise<void> {
       })
     );
   }
+}
+
+/**
+ * Convenience wrapper combining the three steps every auth-failure call
+ * site needs: build the event, always log it, and best-effort schedule the
+ * webhook alert. Callers keep their own event-name string literal
+ * ("mcp_auth_failure" / "oauth_authorize_failure" / "oauth_token_failure")
+ * and just pass it through.
+ */
+export function reportSecurityFailure(
+  req: Request,
+  event: string,
+  reason: string,
+  extra?: Record<string, unknown>
+): void {
+  const evt = buildSecurityEvent(req, event, reason, extra);
+  logSecurityEvent(evt); // always — visible in Vercel's function logs
+  scheduleSecurityAlert(evt); // best-effort webhook, non-blocking
 }
