@@ -3,6 +3,7 @@ import {
   verifyClientCredentials,
   verifyPkce,
 } from "@/lib/oauth";
+import { reportSecurityFailure } from "@/lib/securityAlert";
 
 function jsonError(error: string, status = 400) {
   return Response.json({ error }, { status });
@@ -32,6 +33,9 @@ export async function POST(req: Request) {
   }
 
   if (params.get("grant_type") !== "authorization_code") {
+    reportSecurityFailure(req, "oauth_token_failure", "unsupported_grant_type", {
+      grantType: params.get("grant_type"),
+    });
     return jsonError("unsupported_grant_type");
   }
 
@@ -42,26 +46,36 @@ export async function POST(req: Request) {
   const codeVerifier = params.get("code_verifier");
 
   if (!code || !clientId || !clientSecret || !redirectUri || !codeVerifier) {
+    reportSecurityFailure(req, "oauth_token_failure", "invalid_request_missing_fields");
     return jsonError("invalid_request");
   }
 
   if (!verifyClientCredentials(clientId, clientSecret)) {
+    // The one check in this whole flow that most directly gates on a
+    // genuine secret (OAUTH_CLIENT_SECRET) — a failure here is the
+    // strongest single signal that someone is guessing at this server's
+    // credentials rather than just misconfiguring a legitimate client.
+    reportSecurityFailure(req, "oauth_token_failure", "invalid_client", { clientId });
     return jsonError("invalid_client", 401);
   }
 
   const payload = verifyAuthorizationCode(code);
   if (!payload) {
+    reportSecurityFailure(req, "oauth_token_failure", "invalid_grant_bad_code");
     return jsonError("invalid_grant");
   }
   if (payload.clientId !== clientId || payload.redirectUri !== redirectUri) {
+    reportSecurityFailure(req, "oauth_token_failure", "invalid_grant_mismatch");
     return jsonError("invalid_grant");
   }
   if (!verifyPkce(codeVerifier, payload.codeChallenge)) {
+    reportSecurityFailure(req, "oauth_token_failure", "invalid_grant_pkce");
     return jsonError("invalid_grant");
   }
 
   const accessToken = process.env.MCP_BEARER_TOKEN;
   if (!accessToken) {
+    reportSecurityFailure(req, "oauth_token_failure", "server_not_configured");
     return jsonError("server_error", 500);
   }
 
