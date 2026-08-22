@@ -61,11 +61,13 @@ Same design as fitness-mcp: every write tool requires a `confirm: true` argument
 
 ### What's unverified
 
-No FatSecret API registration existed while this project was built (that step needs a human — see Setup below), so:
+No FatSecret API registration existed while this project was first built, so most of it started as best-effort reconstructions. Since then it's been checked against a real account for some tools — status below:
 
-- `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`profile.get`/`food_entries.get`/`weights.get_month` method names and core params are confirmed against working third-party FatSecret client implementations (not guessed) — see the git history for sources.
-- `food.find_id_for_barcode`'s response shape, `weight.update`'s param names, and all of `exercise_entries.*` are **best-effort reconstructions**, flagged inline in `lib/fatsecret/*.ts` with the reasoning. Treat these as a strong starting point, not verified truth.
-- Run the manual verification checklist below against a real account after registering, and fix up any field-name mismatches you find (the unit tests in `lib/fatsecret/*.test.ts` will need matching updates).
+- **Confirmed live, matches the implementation exactly**: `search_foods` (`foods.search`), `get_food_diary` (`food_entries.get`, including the `meal` field's real capitalization, e.g. `"Breakfast"`).
+- **Confirmed live, fixed after checking**: `get_profile` (`profile.get`) — a real response included `height_cm`, which wasn't surfaced as a field yet; now added.
+- **Confirmed live, real shape is more complex than assumed**: `get_exercise_diary` (`exercise_entries.get`). The method/envelope are real, but a real entry synced from a connected health app (`{exercise_id: "184", exercise_name: "Google Health Connect", minutes: "1440", calories: "1655"}` — a full day's aggregated activity, not a single workout) has **no `exercise_entry_id` and no `date_int` at all**. `lib/fatsecret/exercise.ts` now handles this defensively (missing fields become `null`, not a crash or a misleading fabricated value) and keeps the full raw entry under `raw`. Still open: whether a *manually*-logged exercise (via the FatSecret app) has an id/date the way `food_entries.get`'s entries do — untested.
+- **Still unverified / best-effort reconstructions**: `food.find_id_for_barcode`'s response shape, `weight.update`'s param names, and `create_exercise_entry`'s method name and params (the exercise-diary discovery above means its whole "individual creatable entry" data-model assumption may not hold — see the warning in `lib/fatsecret/exercise.ts`). Treat these as a starting point, not verified truth.
+- Run the manual verification checklist below against a real account for anything in the two bullets above, and fix up any mismatches you find (the unit tests in `lib/fatsecret/*.test.ts` will need matching updates).
 
 ## Setup
 
@@ -162,13 +164,13 @@ npm run test:e2e     # starts a real `next start` server and hits it over real H
 
 CI never touches real FatSecret data, and — per "What's unverified" above — some of this server's assumptions about FatSecret's exact response shapes haven't been checked against a real account at all. After registering and running the OAuth1 setup script, work through this checklist and fix any mismatches you find:
 
-1. Set real `FATSECRET_CLIENT_ID`/`FATSECRET_CLIENT_SECRET` in `.env.local`, run `vercel dev`, and call `search_foods` with a real query (e.g. via the smoke-test `curl` pattern above, using `tools/call`) — confirm real results come back and `get_food_detail` on one of them returns sane nutrition numbers.
-2. Call `search_recipes` and `get_recipe_detail` similarly.
-3. If your plan includes the `barcode` scope, call `find_food_by_barcode` with a real product's barcode and confirm the response shape matches `lib/fatsecret/foods.ts`'s `RawFindIdForBarcodeResponse` — fix it if not.
-4. Run `npm run fatsecret:oauth-setup`, then call `get_profile` and `get_food_diary` — confirm the field names in `lib/fatsecret/profile.ts`/`lib/fatsecret/diary.ts` match the real response (they were reconstructed from docs, not captured).
-5. Call `create_food_diary_entry` with `confirm: true` and an obviously-throwaway entry, then `get_food_diary` for the same date and confirm it shows up with the right food/serving/quantity/meal. Then `update_food_diary_entry` it, and `delete_food_diary_entry` it — confirm each round-trips.
-6. If your plan includes weight tracking, call `update_weight` with `confirm: true` and confirm `get_weight_history` reflects it.
-7. `create_exercise_entry` and `get_exercise_diary` are the least-verified pair in this codebase (see the warning at the top of `lib/fatsecret/exercise.ts`) — confirm the exact method name/params against https://platform.fatsecret.com/docs/guides before relying on this one; it may need real fixes, not just verification.
+1. ~~Set real `FATSECRET_CLIENT_ID`/`FATSECRET_CLIENT_SECRET` in `.env.local`, run `vercel dev`, and call `search_foods` with a real query~~ — **done**, confirmed working against a real account. Still do this for `get_food_detail` if you haven't yet — confirm it returns sane nutrition numbers.
+2. Call `search_recipes` and `get_recipe_detail` similarly. **Still open.**
+3. If your plan includes the `barcode` scope, call `find_food_by_barcode` with a real product's barcode and confirm the response shape matches `lib/fatsecret/foods.ts`'s `RawFindIdForBarcodeResponse` — fix it if not. **Still open.**
+4. ~~Run `npm run fatsecret:oauth-setup`, then call `get_profile` and `get_food_diary`~~ — **done**. `get_food_diary` matched exactly; `get_profile` was missing `heightCm`, now fixed — see "What's unverified" above.
+5. Call `create_food_diary_entry` with `confirm: true` and an obviously-throwaway entry, then `get_food_diary` for the same date and confirm it shows up with the right food/serving/quantity/meal. Then `update_food_diary_entry` it, and `delete_food_diary_entry` it — confirm each round-trips. **Still open** — note `meal` comes back capitalized (`"Breakfast"`) from `get_food_diary`; worth double-checking `create_food_diary_entry`/`update_food_diary_entry` accept that same casing on write (or whatever casing FatSecret's write side actually expects) before assuming it's fine.
+6. If your plan includes weight tracking, call `update_weight` with `confirm: true` and confirm `get_weight_history` reflects it. **Still open.**
+7. `create_exercise_entry` and `get_exercise_diary` are the least-verified pair in this codebase. `get_exercise_diary`'s method/envelope are now confirmed real, but revealed the exercise diary's data model is more complex than assumed (see "What's unverified" above) — before trusting `create_exercise_entry`, log an exercise **manually in the FatSecret app** first and re-check `get_exercise_diary` to see whether a manual entry has an `exercise_entry_id`/`date_int` the way food entries do; that'll tell you whether "individual creatable entry" is even the right model here, before you try `create_exercise_entry` itself against real data.
 8. Never commit real FatSecret credentials, and never run this checklist in CI.
 
 ## Environment variables

@@ -36,21 +36,18 @@ describe("getExerciseDiary", () => {
   });
 
   it("normalizes entries and converts numeric fields", async () => {
+    const rawEntry = {
+      exercise_entry_id: "1",
+      exercise_id: "50",
+      exercise_name: "Running",
+      minutes: "30",
+      calories: "300",
+      date_int: "20678",
+    };
     stubApi(
       () =>
         new Response(
-          JSON.stringify({
-            exercise_entries: {
-              exercise_entry: {
-                exercise_entry_id: "1",
-                exercise_id: "50",
-                exercise_name: "Running",
-                minutes: "30",
-                calories: "300",
-                date_int: "20678",
-              },
-            },
-          }),
+          JSON.stringify({ exercise_entries: { exercise_entry: rawEntry } }),
           { status: 200 }
         )
     );
@@ -63,6 +60,43 @@ describe("getExerciseDiary", () => {
         minutes: 30,
         calories: 300,
         dateDaysSinceEpoch: 20678,
+        raw: rawEntry,
+      },
+    ]);
+  });
+
+  // Regression test for a real response observed against a live account: an
+  // entry synced from a connected health app (not manually logged) has no
+  // exercise_entry_id and no date_int at all — those keys are simply absent.
+  // Before this fix, Number(undefined) silently produced NaN, which
+  // JSON-serializes as null — indistinguishable from a real null and
+  // therefore misleading. This confirms both fields come back as an
+  // explicit `null` for the right reason (field absent), not a byproduct of
+  // NaN coercion, and that the full raw entry is preserved.
+  it("handles an entry with no exercise_entry_id/date_int (e.g. synced from a connected health app) without fabricating values", async () => {
+    const rawEntry = {
+      exercise_id: "184",
+      exercise_name: "Google Health Connect",
+      minutes: "1440",
+      calories: "1655",
+    };
+    stubApi(
+      () =>
+        new Response(
+          JSON.stringify({ exercise_entries: { exercise_entry: rawEntry } }),
+          { status: 200 }
+        )
+    );
+    const diary = await getExerciseDiary("2026-08-17");
+    expect(diary.entries).toEqual([
+      {
+        exerciseEntryId: null,
+        exerciseId: "184",
+        name: "Google Health Connect",
+        minutes: 1440,
+        calories: 1655,
+        dateDaysSinceEpoch: null,
+        raw: rawEntry,
       },
     ]);
   });

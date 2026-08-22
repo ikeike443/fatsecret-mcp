@@ -1,18 +1,20 @@
 // profile.get — Signed & Delegated, read-only. See lib/fatsecret/oauth1.ts.
 //
-// Field shape below is reconstructed from FatSecret's documented method
-// description, not a captured real response (no real account was available
-// while building this) — confirm against a real get_profile call once
-// FATSECRET_ACCESS_TOKEN is set up (README's manual-verification checklist)
-// and adjust if any field name is off. Passed through close to raw with
-// snake_case -> camelCase only, deliberately not narrowed further, so an
-// unexpected/renamed field still surfaces instead of being silently dropped.
+// Verified against a real profile.get response (see PR history): the shape
+// below — including height_cm, added after that verification — matches a
+// real account's response. weight_measure/height_measure come back
+// capitalized ("Kg"/"Cm"), not lowercase; passed through as-is rather than
+// normalized, since nothing here depends on their case. Still passed
+// through close to raw with snake_case -> camelCase only, deliberately not
+// narrowed further, so an unexpected/renamed field still surfaces via `raw`
+// instead of being silently dropped.
 import { fatsecretDelegatedRequest } from "./oauth1";
 
 interface RawProfile {
   last_weight_kg?: string;
   last_weight_date_int?: string;
   weight_measure?: string;
+  height_cm?: string;
   height_measure?: string;
   goal_weight_kg?: string;
   [key: string]: unknown;
@@ -34,6 +36,7 @@ export async function getProfile() {
       ? Number(p.last_weight_date_int)
       : null,
     weightMeasure: p.weight_measure ?? null,
+    heightCm: p.height_cm ? Number(p.height_cm) : null,
     heightMeasure: p.height_measure ?? null,
     goalWeightKg: p.goal_weight_kg ? Number(p.goal_weight_kg) : null,
     raw: p,
