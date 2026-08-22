@@ -75,7 +75,7 @@ No FatSecret API registration existed while this project was first built, so mos
    - An **OAuth 2.0 Client ID/Secret** (for `FATSECRET_CLIENT_ID`/`FATSECRET_CLIENT_SECRET`).
    - An **OAuth 1.0 Consumer Key/Secret** (for `FATSECRET_CONSUMER_KEY`/`FATSECRET_CONSUMER_SECRET`) — a separate pair from the same app, not the same as the OAuth2 credentials above.
    - Check which scopes your plan includes (`basic` / `premier` / `barcode` / ...) — `weights.get_month`/`weight.update`/`find_food_by_barcode` are reported to require Premier or the `barcode`/`premier` scopes; confirm this against your own plan and adjust `FATSECRET_OAUTH2_SCOPE` if needed.
-   - **Allowlist your outbound IP(s)** for OAuth2 token requests — FatSecret requires this (up to 15 addresses/ranges). If deploying to Vercel, this needs a static outbound IP (e.g. via a Vercel-supported egress proxy/addon); Vercel's default serverless functions don't have a fixed IP.
+   - **Allowlist your outbound IP(s)** (up to 15 addresses/ranges) — FatSecret's IP restriction is **not limited to the token endpoint**: confirmed against a real Vercel deployment that the actual `foods.search` API call itself was rejected (error code 21, "Invalid IP address detected") from a non-allowlisted IP, even with a validly-issued token. So both the one-time OAuth2 token fetch and every single search/detail call need to originate from an allowlisted IP. Locally this is just your machine's own public IP (`curl https://ifconfig.me`). On Vercel, whose serverless functions have no fixed outbound IP by default, see "Fixed outbound IP for Vercel" below — required before any Signed Request tool will work in production.
 2. **Run the local dev server once** to smoke-test search (Phase 2 only needs step 1):
    ```bash
    npm install
@@ -83,7 +83,20 @@ No FatSecret API registration existed while this project was first built, so mos
    vercel dev
    ```
 3. **Run the one-time 3-legged OAuth1 setup** (needed for every tool except the 5 search/detail ones) — see Phase 3 below.
-4. **Deploy to Vercel** — see Deploy below.
+4. **Deploy to Vercel** — see Deploy below, but read "Fixed outbound IP for Vercel" first.
+
+## Fixed outbound IP for Vercel
+
+Vercel's serverless functions don't have a fixed outbound IP, which is a problem given the finding above — every `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`find_food_by_barcode` call, not just the token fetch, needs to come from an allowlisted IP. Without this, those five tools work fine locally (your machine's IP is what you allowlisted) but fail in production with `FatSecret API error 21: Invalid IP address detected`.
+
+Fix: route those requests through a fixed-IP HTTP proxy. This server supports [Fixie](https://usefixie.com/) out of the box:
+
+1. Sign up at usefixie.com — the free `tricycleFree` plan (500 requests/100MB per month, $0) is enough for personal use, since this only carries FatSecret's Signed Request traffic, not your whole app. Note the plan's request quota is a real constraint, unlike an app-only rate limit — if you search a lot, watch usage and upgrade (`commuter`, $5/mo/2,500 requests) if you get close.
+2. Copy the proxy URL Fixie gives you (`http://fixie:<password>@<host>:<port>`).
+3. Set it as `FIXIE_URL` — in `.env.local` for local testing against the proxy, and as a Vercel environment variable for production. Leave it unset for ordinary local development (where your own IP is already allowlisted directly) — `lib/fatsecret/appAuth.ts` only routes through the proxy when `FIXIE_URL` is present.
+4. Allowlist Fixie's fixed IP (shown on your Fixie dashboard) in the FatSecret developer console, in addition to (not instead of) any IP(s) you allowlisted for local development.
+
+No other server-to-FatSecret traffic goes through this proxy — the OAuth1 (Signed & Delegated) requests in `lib/fatsecret/oauth1.ts` aren't IP-restricted, so diary/weight/exercise/profile tools don't need `FIXIE_URL` at all.
 
 ## Local development
 
@@ -180,6 +193,7 @@ CI never touches real FatSecret data, and — per "What's unverified" above — 
 | `FATSECRET_CLIENT_ID` / `FATSECRET_CLIENT_SECRET` | OAuth 2.0 Client Credentials — Signed Request methods (search/detail tools) |
 | `FATSECRET_OAUTH2_SCOPE` | Optional. Space-delimited OAuth2 scope(s), default `basic`. Add `barcode`/`premier` as needed |
 | `FATSECRET_FOOD_GET_METHOD` | Optional. Defaults to `food.get.v4`; override (e.g. `food.get`) if your plan lacks v4 access |
+| `FIXIE_URL` | Optional. Fixed-IP HTTP proxy URL (`http://fixie:<password>@<host>:<port>`) for the OAuth2 token fetch and every Signed Request call — required on Vercel, since it has no fixed outbound IP by default. See "Fixed outbound IP for Vercel" above. Leave unset for local development. |
 | `FATSECRET_CONSUMER_KEY` / `FATSECRET_CONSUMER_SECRET` | OAuth 1.0 Consumer Key/Secret — signs both the one-time setup script and every Signed & Delegated call |
 | `FATSECRET_ACCESS_TOKEN` / `FATSECRET_ACCESS_TOKEN_SECRET` | OAuth 1.0 access token/secret for *your* FatSecret account — obtained via `npm run fatsecret:oauth-setup` (Phase 3) |
 | `MCP_BEARER_TOKEN` | Shared secret this server requires on every request, and the access_token our OAuth flow issues |
@@ -191,10 +205,11 @@ Set these in the Vercel project's Environment Variables (Production + Preview). 
 ## Deploy
 
 1. `vercel link`
-2. `vercel env add FATSECRET_CLIENT_ID` (repeat for every variable in the table above that you have a value for — at minimum `FATSECRET_CLIENT_ID`/`SECRET`, `MCP_BEARER_TOKEN`, `OAUTH_CLIENT_ID`/`SECRET`; add the `FATSECRET_CONSUMER_*`/`FATSECRET_ACCESS_TOKEN*` pair once you've run the OAuth1 setup script)
-3. Connect this GitHub repo in the Vercel dashboard for auto-deploy on push to `main`, or run `vercel --prod` manually.
-4. Note the deployed URL (check Project → Settings → Domains, since `fatsecret-mcp.vercel.app` may already be taken on Vercel's shared namespace).
-5. **Allowlist that deployment's outbound IP** in the FatSecret developer console for OAuth2 token requests (see Setup step 1) — this is the step most likely to bite in production since Vercel serverless functions don't have a fixed IP by default.
+2. `vercel env add FATSECRET_CLIENT_ID` (repeat for every variable in the table above that you have a value for — at minimum `FATSECRET_CLIENT_ID`/`SECRET`, `MCP_BEARER_TOKEN`, `OAUTH_CLIENT_ID`/`SECRET`; add `FIXIE_URL` per "Fixed outbound IP for Vercel" above — required, not optional, in practice; add the `FATSECRET_CONSUMER_*`/`FATSECRET_ACCESS_TOKEN*` pair once you've run the OAuth1 setup script)
+3. **Set the Vercel project's Node.js Version to 22.19 or newer** (Project → Settings → General → Node.js Version, or wherever the current Vercel dashboard puts it) *before* deploying — i.e. before step 4 below. This server's `undici@8` dependency (used for the Fixie proxy — see "Fixed outbound IP for Vercel" above) declares `"engines": {"node": ">=22.19.0"}`, and `package.json`'s own `engines` field here documents the same requirement — but neither one actually enforces anything on Vercel by itself, so a project still pinned to an older Node version (e.g. 20.x) will deploy "successfully" and then fail at runtime.
+4. Connect this GitHub repo in the Vercel dashboard for auto-deploy on push to `main`, or run `vercel --prod` manually.
+5. Note the deployed URL (check Project → Settings → Domains — this project's production URL turned out to be the unclaimed `https://fatsecret-mcp.vercel.app`, but that's Vercel's shared namespace, so don't assume it'll be free for a fork).
+6. **Allowlist Fixie's fixed IP** in the FatSecret developer console (see "Fixed outbound IP for Vercel" above) — this is the step most likely to bite in production, since without it `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`find_food_by_barcode` all fail with `FatSecret API error 21`.
 
 ## Connect to Claude
 
