@@ -9,12 +9,58 @@
 // description for links): the token endpoint is oauth.fatsecret.com, HTTP
 // Basic auth with client_id:client_secret, grant_type=client_credentials,
 // and a space-delimited "scope" request param. Valid scopes: basic, premier,
-// barcode, localization, nlp, image-recognition, feedback. FatSecret's docs
-// (https://platform.fatsecret.com/docs/guides/authentication/oauth2) note
-// this token request must come from an IP allowlisted in the FatSecret
-// developer console (up to 15 addresses/ranges) — see README setup steps.
+// barcode, localization, nlp, image-recognition, feedback.
+//
+// IP allowlisting: confirmed against a real Vercel deployment (see git
+// history) that FatSecret's IP restriction is NOT limited to the token
+// endpoint — a request to platform.fatsecret.com/rest/server.api using a
+// validly-issued token was still rejected (error code 21, "Invalid IP
+// address detected") when made from a non-allowlisted IP. So both the
+// token request AND every actual API call need to come from an allowlisted
+// IP, not just the former as initially assumed. Since Vercel serverless
+// functions don't have a fixed outbound IP, this module routes both
+// requests through a fixed-IP HTTP proxy (e.g. Fixie, see README) whenever
+// FIXIE_URL is set — see proxyDispatcher() below. Locally, where the
+// machine's own IP is what you allowlist directly, just leave FIXIE_URL
+// unset.
+import { ProxyAgent } from "undici";
 
 const TOKEN_URL = "https://oauth.fatsecret.com/connect/token";
+
+// Lazily constructed so a missing/malformed FIXIE_URL only breaks requests
+// that actually need it, and so tests that never set FIXIE_URL never pay
+// for it. Cached (not one per request) since ProxyAgent manages its own
+// connection pool internally — constructing a fresh one per call would
+// defeat that.
+let cachedDispatcher: ProxyAgent | undefined;
+let cachedDispatcherUrl: string | undefined;
+
+function proxyDispatcher(): ProxyAgent | undefined {
+  const url = process.env.FIXIE_URL;
+  if (!url) return undefined;
+  if (cachedDispatcher && cachedDispatcherUrl === url) return cachedDispatcher;
+  cachedDispatcher = new ProxyAgent(url);
+  cachedDispatcherUrl = url;
+  return cachedDispatcher;
+}
+
+// Node's global fetch (undici under the hood) accepts a `dispatcher` option
+// that isn't part of the standard lib.dom.d.ts RequestInit type — this
+// widens just enough to pass it through without an `any` cast at every call
+// site. See https://nodejs.org/api/globals.html#fetch and undici's
+// ProxyAgent docs.
+type FetchInitWithDispatcher = RequestInit & { dispatcher?: ProxyAgent };
+
+function withOptionalProxy(init: RequestInit): FetchInitWithDispatcher {
+  const dispatcher = proxyDispatcher();
+  return dispatcher ? { ...init, dispatcher } : init;
+}
+
+/** Test-only: clears the cached proxy dispatcher so a changed FIXIE_URL takes effect. */
+export function _resetProxyDispatcherForTests(): void {
+  cachedDispatcher = undefined;
+  cachedDispatcherUrl = undefined;
+}
 
 interface CachedToken {
   accessToken: string;
@@ -63,14 +109,17 @@ async function fetchAppAccessToken(scope: string): Promise<CachedToken> {
     "base64"
   );
 
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ grant_type: "client_credentials", scope }).toString(),
-  });
+  const res = await fetch(
+    TOKEN_URL,
+    withOptionalProxy({
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials", scope }).toString(),
+    })
+  );
 
   if (!res.ok) {
     throw new Error(
@@ -120,14 +169,17 @@ export async function fatsecretAppRequest<T>(
     if (value !== undefined) body.set(key, String(value));
   }
 
-  const res = await fetch(API_BASE, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
-  });
+  const res = await fetch(
+    API_BASE,
+    withOptionalProxy({
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    })
+  );
 
   const text = await res.text();
   if (!res.ok) {

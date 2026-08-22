@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { ProxyAgent } from "undici";
 import {
   getAppAccessToken,
   fatsecretAppRequest,
   _resetAppAccessTokenCacheForTests,
+  _resetProxyDispatcherForTests,
 } from "./appAuth";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -11,7 +13,9 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   process.env.FATSECRET_CLIENT_ID = "test-client-id";
   process.env.FATSECRET_CLIENT_SECRET = "test-client-secret";
+  delete process.env.FIXIE_URL;
   _resetAppAccessTokenCacheForTests();
+  _resetProxyDispatcherForTests();
 });
 
 afterEach(() => {
@@ -153,5 +157,72 @@ describe("fatsecretAppRequest", () => {
     );
 
     await expect(fatsecretAppRequest("foods.search", {})).rejects.toThrow(/non-JSON/);
+  });
+});
+
+describe("FIXIE_URL proxying", () => {
+  // Regression coverage for a real finding: FatSecret's IP allowlist check
+  // is NOT limited to the token endpoint — a real Vercel deployment (no
+  // fixed outbound IP) was rejected with error code 21 ("Invalid IP
+  // address detected") on the *food-search* API call itself, using a
+  // validly-issued token. So both requests need to go through a fixed-IP
+  // proxy when one is configured, not just the token request.
+  it("does not attach a dispatcher to either request when FIXIE_URL is unset", async () => {
+    const capturedInits: (RequestInit & { dispatcher?: unknown })[] = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit & { dispatcher?: unknown }) => {
+      capturedInits.push(init);
+      if (url === "https://oauth.fatsecret.com/connect/token") return tokenResponse();
+      return new Response(JSON.stringify({ foods: { food: [] } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fatsecretAppRequest("foods.search", { search_expression: "apple" });
+
+    expect(capturedInits).toHaveLength(2);
+    for (const init of capturedInits) {
+      expect(init.dispatcher).toBeUndefined();
+    }
+  });
+
+  it("attaches a ProxyAgent dispatcher to both the token request and the API request when FIXIE_URL is set", async () => {
+    process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
+    const capturedInits: (RequestInit & { dispatcher?: unknown })[] = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit & { dispatcher?: unknown }) => {
+      capturedInits.push(init);
+      if (url === "https://oauth.fatsecret.com/connect/token") return tokenResponse();
+      return new Response(JSON.stringify({ foods: { food: [] } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fatsecretAppRequest("foods.search", { search_expression: "apple" });
+
+    expect(capturedInits).toHaveLength(2);
+    const dispatchers = capturedInits.map((init) => init.dispatcher);
+    expect(dispatchers[0]).toBeInstanceOf(ProxyAgent);
+    expect(dispatchers[1]).toBeInstanceOf(ProxyAgent);
+    // Reused, not rebuilt per request — see proxyDispatcher()'s caching.
+    expect(dispatchers[0]).toBe(dispatchers[1]);
+  });
+
+  it("rebuilds the dispatcher if FIXIE_URL changes between calls", async () => {
+    process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
+    const capturedInits: (RequestInit & { dispatcher?: unknown })[] = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit & { dispatcher?: unknown }) => {
+      expect(url).toBe("https://oauth.fatsecret.com/connect/token");
+      capturedInits.push(init);
+      return tokenResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await getAppAccessToken();
+    const firstDispatcher = capturedInits[0].dispatcher;
+
+    process.env.FIXIE_URL = "http://fixie:secret@fixie-2.example.com:12345";
+    _resetAppAccessTokenCacheForTests(); // force a second token fetch
+    await getAppAccessToken();
+    const secondDispatcher = capturedInits[1].dispatcher;
+
+    expect(firstDispatcher).toBeInstanceOf(ProxyAgent);
+    expect(secondDispatcher).toBeInstanceOf(ProxyAgent);
+    expect(firstDispatcher).not.toBe(secondDispatcher);
   });
 });
