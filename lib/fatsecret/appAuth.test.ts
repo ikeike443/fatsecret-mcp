@@ -231,3 +231,75 @@ describe("FIXIE_URL proxying", () => {
     expect(firstDispatcher).not.toBe(secondDispatcher);
   });
 });
+
+describe("network-level fetch error diagnostics", () => {
+  // Regression coverage: a real "fetch failed" in production (undici's
+  // generic message for any network-level failure — DNS, connection
+  // refused, proxy tunnel failure, ...) carried none of the actual reason
+  // in the MCP tool response, since mcp-handler surfaces only `.message`
+  // and the real detail lives in `.cause`. This is what actually broke
+  // diagnosing a bad/unreachable FIXIE_URL in practice — see git history.
+  it("inlines a single-level .cause into the thrown message", async () => {
+    const networkError = new TypeError("fetch failed");
+    (networkError as Error & { cause?: unknown }).cause = Object.assign(
+      new Error("getaddrinfo ENOTFOUND fixie.example.com"),
+      { code: "ENOTFOUND" }
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw networkError;
+      })
+    );
+
+    await expect(getAppAccessToken()).rejects.toThrow(
+      /fetch failed.*getaddrinfo ENOTFOUND fixie\.example\.com \(ENOTFOUND\)/
+    );
+  });
+
+  it("walks a multi-level .cause chain (e.g. a wrapped proxy tunnel failure)", async () => {
+    const socketError = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const tunnelError = Object.assign(new Error("Proxy connection failed"), {
+      cause: socketError,
+    });
+    const fetchError = Object.assign(new TypeError("fetch failed"), { cause: tunnelError });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw fetchError;
+      })
+    );
+
+    await expect(getAppAccessToken()).rejects.toThrow(
+      /fetch failed.*Proxy connection failed.*read ECONNRESET \(ECONNRESET\)/
+    );
+  });
+
+  it("mentions FIXIE_URL in the error message only when a proxy was actually configured", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      })
+    );
+    // No FIXIE_URL set (this test file's beforeEach deletes it) — no
+    // dispatcher was in play, so pointing at it would misdirect debugging.
+    const withoutProxy = await getAppAccessToken().catch((e: Error) => e);
+    expect(withoutProxy).toBeInstanceOf(Error);
+    expect((withoutProxy as Error).message).not.toMatch(/FIXIE_URL/);
+
+    process.env.FIXIE_URL = "http://fixie:secret@fixie.example.com:12345";
+    _resetProxyDispatcherForTests();
+    await expect(getAppAccessToken()).rejects.toThrow(/FIXIE_URL/);
+  });
+
+  it("does not intercept HTTP-level errors (non-2xx responses) — those already carry real detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("invalid_client", { status: 401 }))
+    );
+    // Unchanged from before this fix: a real HTTP response's status/body,
+    // not the network-error diagnostic wrapping.
+    await expect(getAppAccessToken()).rejects.toThrow(/FatSecret OAuth2 token request failed 401/);
+  });
+});

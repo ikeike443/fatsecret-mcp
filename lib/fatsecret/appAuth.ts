@@ -62,6 +62,53 @@ function withOptionalProxy(init: RequestInit): FetchInitWithDispatcher {
   return dispatcher ? { ...init, dispatcher } : init;
 }
 
+// Node's fetch (undici) reports every network-level failure (DNS, refused
+// connection, proxy tunnel failure, TLS, ...) as a generic `TypeError:
+// fetch failed` — the actually useful detail lives in `.cause`, often
+// several levels deep (e.g. a proxy CONNECT failure wraps the underlying
+// socket error). Left alone, that detail never reaches the MCP tool
+// response (mcp-handler surfaces only `.message`), which turned "fetch
+// failed" into a real support case that took much longer to diagnose than
+// it should have — see git history. Walks the `.cause` chain so the actual
+// reason (a DNS/connection error code, an auth failure, etc.) is visible.
+function describeErrorChain(err: unknown, depth = 0): string {
+  if (depth > 5 || err === undefined || err === null) return "";
+  if (!(err instanceof Error)) return String(err);
+  const code = (err as NodeJS.ErrnoException).code;
+  const label = code ? `${err.message} (${code})` : err.message;
+  const causeStr =
+    "cause" in err && err.cause !== undefined
+      ? describeErrorChain(err.cause, depth + 1)
+      : "";
+  return causeStr ? `${label} -> ${causeStr}` : label;
+}
+
+/**
+ * fetch(), but a thrown network-level error is re-thrown with its full
+ * `.cause` chain inlined into the message (see describeErrorChain), plus a
+ * pointer at FIXIE_URL when a proxy was in play — since a broken/malformed
+ * FIXIE_URL manifesting as an opaque "fetch failed" is the single most
+ * likely cause of this in production (see README's "Fixed outbound IP for
+ * Vercel"). HTTP-level errors (non-2xx responses) are unaffected — those
+ * already carry a real status/body and are handled by each caller.
+ */
+async function fetchWithDiagnostics(
+  url: string,
+  init: FetchInitWithDispatcher
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const detail = describeErrorChain(err);
+    const proxyHint = init.dispatcher
+      ? " A FIXIE_URL proxy is configured — check it's reachable and correctly formatted (see README's \"Fixed outbound IP for Vercel\")."
+      : "";
+    throw new Error(
+      `Network error calling ${url}: ${detail || String(err)}.${proxyHint}`
+    );
+  }
+}
+
 /** Test-only: clears the cached proxy dispatcher so a changed FIXIE_URL takes effect. */
 export function _resetProxyDispatcherForTests(): void {
   cachedDispatcher = undefined;
@@ -115,7 +162,7 @@ async function fetchAppAccessToken(scope: string): Promise<CachedToken> {
     "base64"
   );
 
-  const res = await fetch(
+  const res = await fetchWithDiagnostics(
     TOKEN_URL,
     withOptionalProxy({
       method: "POST",
@@ -175,7 +222,7 @@ export async function fatsecretAppRequest<T>(
     if (value !== undefined) body.set(key, String(value));
   }
 
-  const res = await fetch(
+  const res = await fetchWithDiagnostics(
     API_BASE,
     withOptionalProxy({
       method: "POST",
