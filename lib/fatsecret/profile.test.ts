@@ -29,8 +29,9 @@ describe("getProfile", () => {
             profile: {
               last_weight_kg: "70.5",
               last_weight_date_int: "20678",
-              weight_measure: "kg",
-              height_measure: "cm",
+              weight_measure: "Kg",
+              height_cm: "176.00",
+              height_measure: "Cm",
               goal_weight_kg: "65.0",
             },
           }),
@@ -42,7 +43,11 @@ describe("getProfile", () => {
     const profile = await getProfile();
     expect(profile.lastWeightKg).toBe(70.5);
     expect(profile.lastWeightDateDaysSinceEpoch).toBe(20678);
-    expect(profile.weightMeasure).toBe("kg");
+    // Confirmed against a real account: weight_measure/height_measure come
+    // back capitalized ("Kg"/"Cm"), not lowercase — passed through as-is.
+    expect(profile.weightMeasure).toBe("Kg");
+    expect(profile.heightCm).toBe(176);
+    expect(profile.heightMeasure).toBe("Cm");
     expect(profile.goalWeightKg).toBe(65.0);
     expect(profile.raw).toMatchObject({ last_weight_kg: "70.5" });
   });
@@ -54,6 +59,7 @@ describe("getProfile", () => {
     );
     const profile = await getProfile();
     expect(profile.lastWeightKg).toBeNull();
+    expect(profile.heightCm).toBeNull();
     expect(profile.goalWeightKg).toBeNull();
   });
 });
