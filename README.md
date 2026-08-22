@@ -24,6 +24,8 @@ Claude  <──①── this server (fatsecret-mcp)  ──②──>  FatSecre
 
 **① Claude ↔ this server** — a single shared secret, same pattern as fitness-mcp. Claude sends `Authorization: Bearer <MCP_BEARER_TOKEN>` on every request; `lib/auth.ts` checks it. Since Claude's static-header option is still beta-gated, this server also runs its own minimal OAuth 2.1 authorization server (`lib/oauth.ts`, `/api/oauth/authorize`, `/api/oauth/token`) so Claude's standard OAuth Client ID/Secret fields work as an always-available fallback — see fitness-mcp's README for the full reasoning, which applies unchanged here.
 
+Every failure on this layer — a bad/missing `MCP_BEARER_TOKEN`, an unrecognized OAuth `client_id`, a wrong `client_secret`, bad PKCE, a disallowed `redirect_uri` — is logged and, optionally, alerted on in real time; see "Security event logging & alerting" below.
+
 **② this server ↔ FatSecret** — this is where it gets more complex than fitness-mcp, because FatSecret itself uses **two different OAuth versions for two different kinds of API method**, and there is no way around that — it's how FatSecret's API is designed, not a choice made here:
 
 | FatSecret method category | Example methods | How this server authenticates |
@@ -32,6 +34,23 @@ Claude  <──①── this server (fatsecret-mcp)  ──②──>  FatSecre
 | **Signed & Delegated Request** (reads/writes *your* FatSecret account) | `food_entries.*`, `food_entry.*`, `weights.get_month`, `weight.update`, `exercise_entries.*`, `profile.get`, `foods.get_favorites` | OAuth **1.0a**, 3-legged, HMAC-SHA1 signed — `lib/fatsecret/oauth1.ts`. FatSecret does not support OAuth 2.0 for these methods at all, so there is no way to avoid OAuth1 here. This requires a **one-time interactive authorization** (Phase 3, below) where you log into FatSecret in a browser and approve this app; the resulting access token/secret are then reused automatically forever after (see caveat under Phase 3). |
 
 Concretely: `search_foods`/`get_food_detail`/`search_recipes`/`get_recipe_detail`/`find_food_by_barcode` work as soon as you've registered a FatSecret app and set `FATSECRET_CLIENT_ID`/`FATSECRET_CLIENT_SECRET`. Every other tool additionally needs `FATSECRET_CONSUMER_KEY`/`FATSECRET_CONSUMER_SECRET` (OAuth1 — a *different* credential pair from the same FatSecret app) and `FATSECRET_ACCESS_TOKEN`/`FATSECRET_ACCESS_TOKEN_SECRET` (obtained by running the setup script once).
+
+## Security event logging & alerting
+
+Every failed check on layer ① above (Claude ↔ this server) is reported through `lib/securityAlert.ts`, gating the following spots:
+
+- `lib/auth.ts` (`verifyBearerToken`) — missing bearer token, wrong bearer token, `MCP_BEARER_TOKEN` not configured.
+- `/api/oauth/authorize` — unrecognized `client_id`, disallowed `redirect_uri` (the open-redirector case `isAllowedRedirectUri` exists to block), unsupported `response_type`, missing/non-S256 PKCE challenge, `OAUTH_CLIENT_SECRET` not configured.
+- `/api/oauth/token` — wrong `client_secret`, invalid/expired authorization code, code/PKCE/redirect_uri mismatch, `MCP_BEARER_TOKEN` not configured.
+
+Two independent layers, so this degrades gracefully:
+
+1. **Always logged.** Every failure above writes one line of structured JSON (`event`, `reason`, `ip`, `userAgent`, `path`, `time`) to `stderr` via `console.error` — no setup required, and on Vercel this shows up in the deployment's function logs as-is. **The actual bearer token / client secret / PKCE verifier value is never included** — only metadata about the failed attempt — since a detection mechanism that could itself leak the secret it's watching for would defeat the point; `lib/securityAlert.test.ts` and `lib/auth.test.ts` assert this directly.
+2. **Optional real-time alert.** If `SECURITY_ALERT_WEBHOOK_URL` is set (a Slack or Discord "incoming webhook" URL), the same event is also POSTed there as a one-line message, so an attempted intrusion surfaces as a push notification instead of only being visible when someone happens to open the Vercel log viewer. A webhook delivery failure (expired URL, network error) is itself logged as `security_alert_delivery_failed`, so a silently-broken webhook doesn't read as "no attempts."
+
+The webhook POST is scheduled via Next's `after()` so it runs after the response has already been sent (no added latency on the auth check); this only works inside a real request, so it falls back to a plain fire-and-forget call when invoked directly (e.g. from tests).
+
+This is intentionally a simple "alert on every failure" design, not threshold/rate-based alerting — see `lib/auth.ts`/`lib/securityAlert.ts` doc comments for what was scoped out (count-based thresholds, Vercel's own platform-level monitoring, credential rotation) and why.
 
 ## Tools exposed
 
@@ -199,6 +218,7 @@ CI never touches real FatSecret data, and — per "What's unverified" above — 
 | `MCP_BEARER_TOKEN` | Shared secret this server requires on every request, and the access_token our OAuth flow issues |
 | `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | Credentials for this server's own minimal OAuth authorization server |
 | `OAUTH_ALLOWED_REDIRECT_HOSTS` | Optional. Comma-separated allowlist for `/api/oauth/authorize`'s `redirect_uri`. Defaults to `claude.ai,claude.com` |
+| `SECURITY_ALERT_WEBHOOK_URL` | Optional. Slack/Discord incoming webhook URL for real-time alerts on auth failures — see "Security event logging & alerting" above. Failures are always logged to `stderr` regardless of whether this is set |
 
 Set these in the Vercel project's Environment Variables (Production + Preview). Never commit real values — `.env.example` only documents the names.
 
