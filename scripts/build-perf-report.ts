@@ -8,8 +8,13 @@
 // Authentication: GITHUB_TOKEN / GH_TOKEN, or an authenticated `gh` CLI when run
 // locally. With no token available the report is skipped (exit 0) rather than
 // failing whatever invoked it.
+//
+// This is a read-only observer, so unless --fail-on-regression asks for it, it
+// must never be the reason a run is red: an unreachable or unhappy GitHub API
+// (a 404 after a workflow rename, a 5xx, a rate limit) is reported as a warning
+// and exits 0. Only a detected regression, with --fail-on-regression, exits 1.
 import { spawn } from "node:child_process";
-import { writeFile, mkdir, appendFile } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -20,16 +25,22 @@ import {
   renderMarkdownTable,
   stepDurationsMs,
   summarizeDurations,
-  type DurationStats,
-  type RegressionCheck,
   type WorkflowJob,
 } from "./lib/buildMetrics";
-import { loadBuildPerfConfig, type BuildPerfConfig } from "./lib/buildPerfConfig";
+import {
+  loadBuildPerfConfig,
+  MAX_HISTORY_RUNS,
+  type BuildPerfConfig,
+} from "./lib/buildPerfConfig";
+import { decideTrendOutcome, type StepTrend } from "./lib/buildPerfOutcomes";
+import { appendStepSummary, emitAnnotation } from "./lib/githubActions";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const API_ROOT = process.env.GITHUB_API_URL ?? "https://api.github.com";
 /** Baseline needs at least this many samples before a comparison means anything. */
 const MIN_BASELINE_SAMPLES = 3;
+/** `owner/name`, checked before it is interpolated into an API URL path. */
+const REPO_SLUG = /^[\w.-]+\/[\w.-]+$/;
 
 interface WorkflowRun {
   id: number;
@@ -37,13 +48,6 @@ interface WorkflowRun {
   head_branch: string | null;
   created_at: string;
   html_url: string;
-}
-
-interface StepTrend {
-  step: string;
-  currentMs: number | null;
-  baseline: DurationStats | null;
-  regression: RegressionCheck | null;
 }
 
 interface TrendReport {
@@ -54,9 +58,22 @@ interface TrendReport {
   job: string;
   baselineBranch: string;
   baselineRuns: number;
+  /** Baseline runs whose job could not be fetched — the baseline is that short. */
+  baselineFetchFailures: number;
   currentRun: { id: number; sha: string; url: string } | null;
   steps: StepTrend[];
   regressions: string[];
+}
+
+interface ReportOptions {
+  repo: string | undefined;
+  workflow: string;
+  job: string;
+  branch: string;
+  historyRuns: number;
+  failOnRegression: boolean;
+  metricsDir: string;
+  noSummary: boolean;
 }
 
 async function main(): Promise<void> {
@@ -85,8 +102,9 @@ async function main(): Promise<void> {
         "  --workflow <file>       workflow file name (default from build-perf.config.json)",
         "  --job <name>            job whose steps are compared",
         "  --branch <name>         baseline branch",
-        "  --limit <n>             how many recent successful runs to sample",
-        "  --fail-on-regression    exit non-zero when a tracked step regressed",
+        `  --limit <n>             how many recent successful runs to sample (2-${MAX_HISTORY_RUNS})`,
+        "  --fail-on-regression    exit non-zero when a tracked step regressed;",
+        "                          also makes an API failure fail the run",
         "  --metrics-dir <dir>     where to write the JSON report",
         "  --no-summary            skip the GitHub Actions step summary",
       ].join("\n"),
@@ -95,17 +113,56 @@ async function main(): Promise<void> {
   }
 
   const config = await loadBuildPerfConfig(ROOT);
-  const workflow = values.workflow ?? config.trend.workflow;
-  const job = values.job ?? config.trend.job;
-  const branch = values.branch ?? config.trend.baselineBranch;
   const historyRuns = values.limit ? Number.parseInt(values.limit, 10) : config.trend.historyRuns;
-  if (!Number.isInteger(historyRuns) || historyRuns < 2) {
-    throw new Error(`--limit must be an integer >= 2, got ${values.limit}`);
+  // The same bounds the config schema enforces: below 2 there is nothing to
+  // compare, and GitHub will not page beyond MAX_HISTORY_RUNS per request, so a
+  // larger --limit would be silently clamped instead of honoured.
+  if (!Number.isInteger(historyRuns) || historyRuns < 2 || historyRuns > MAX_HISTORY_RUNS) {
+    throw new Error(
+      `--limit must be an integer between 2 and ${MAX_HISTORY_RUNS}, got ${values.limit}`,
+    );
+  }
+  if (values.repo !== undefined && !REPO_SLUG.test(values.repo)) {
+    throw new Error(`--repo must look like owner/name, got "${values.repo}"`);
   }
 
-  const repo = values.repo ?? process.env.GITHUB_REPOSITORY ?? (await repoFromGitRemote());
+  const options: ReportOptions = {
+    repo: values.repo,
+    workflow: values.workflow ?? config.trend.workflow,
+    job: values.job ?? config.trend.job,
+    branch: values.branch ?? config.trend.baselineBranch,
+    historyRuns,
+    failOnRegression: values["fail-on-regression"] === true,
+    metricsDir: values["metrics-dir"] ?? ".build-metrics",
+    noSummary: values["no-summary"] === true,
+  };
+
+  try {
+    await runReport(config, options);
+  } catch (error) {
+    if (options.failOnRegression) throw error;
+    // Read-only and warn-only: whatever went wrong with the GitHub API, this
+    // report is not worth failing someone's PR over.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`\nCI timing trend report unavailable: ${reason}`);
+    emitAnnotation({
+      level: "warning",
+      title: "CI timing trend unavailable",
+      message: `${reason} — no timings were compared for this run.`,
+    });
+  }
+}
+
+async function runReport(config: BuildPerfConfig, options: ReportOptions): Promise<void> {
+  const { workflow, job, branch, historyRuns } = options;
+
+  const repo = options.repo ?? process.env.GITHUB_REPOSITORY ?? (await repoFromGitRemote());
   if (!repo) {
     skip("Could not determine the repository (pass --repo owner/name).");
+    return;
+  }
+  if (!REPO_SLUG.test(repo)) {
+    skip(`"${repo}" does not look like an owner/name repository — skipping.`);
     return;
   }
 
@@ -131,7 +188,10 @@ async function main(): Promise<void> {
       return;
     }
     currentRun = baselineRuns.find((run) => run.id === currentRunId) ?? null;
-    baselineRuns = baselineRuns.filter((run) => run.id !== currentRunId);
+    // One extra run is fetched so that dropping the current one still leaves
+    // `historyRuns` samples; on a PR run it is not in the list at all, so the
+    // list has to be trimmed back down to the documented size.
+    baselineRuns = baselineRuns.filter((run) => run.id !== currentRunId).slice(0, historyRuns);
     currentJob = await fetchJob({ repo, runId: currentRunId, job, token });
     if (!currentJob) {
       skip(`Run ${currentRunId} has no job named "${job}" — nothing to compare.`);
@@ -141,20 +201,32 @@ async function main(): Promise<void> {
       currentRun = { id: currentRunId, head_sha: process.env.GITHUB_SHA ?? "", head_branch: null, created_at: new Date().toISOString(), html_url: `${serverUrl()}/${repo}/actions/runs/${currentRunId}` };
     }
   } catch (error) {
-    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-      skip(`GitHub API returned ${error.status} — the token lacks \`actions: read\`; skipping.`);
+    if (error instanceof ApiError && error.status === 401) {
+      skip("GitHub API returned 401 — the token is invalid or expired; skipping.");
+      return;
+    }
+    if (error instanceof ApiError && error.status === 403) {
+      skip(
+        "GitHub API returned 403 — the token lacks `actions: read`, or this run is " +
+          "rate limited; skipping.",
+      );
       return;
     }
     throw error;
   }
 
-  const baselineJobs = (
-    await Promise.all(
-      baselineRuns.map((run) =>
-        fetchJob({ repo, runId: run.id, job, token }).catch(() => null),
-      ),
-    )
-  ).filter((candidate): candidate is WorkflowJob => candidate !== null);
+  // allSettled, not `.catch(() => null)`: a rejected fetch shortens the baseline
+  // and has to be reported, while a run that simply has no job by that name
+  // (an older workflow) is a legitimately absent sample.
+  const baselineResults = await Promise.allSettled(
+    baselineRuns.map((run) => fetchJob({ repo, runId: run.id, job, token })),
+  );
+  const baselineJobs = baselineResults.flatMap((result) =>
+    result.status === "fulfilled" && result.value !== null ? [result.value] : [],
+  );
+  const baselineFetchFailures = baselineResults.filter(
+    (result) => result.status === "rejected",
+  ).length;
 
   const report = buildTrendReport({
     config,
@@ -165,27 +237,23 @@ async function main(): Promise<void> {
     currentRun,
     currentJob,
     baselineJobs,
+    baselineFetchFailures,
   });
 
-  const reportPath = await writeReport(report, values["metrics-dir"]);
+  const reportPath = await writeReport(report, options.metricsDir);
   const markdown = renderReport(report, reportPath);
   console.log(markdown);
-  if (!values["no-summary"]) await appendStepSummary(markdown);
+  if (!options.noSummary) await appendStepSummary(markdown);
 
-  for (const step of report.steps) {
-    if (step.regression?.regressed) {
-      annotate(
-        values["fail-on-regression"] ? "error" : "warning",
-        `Build timing regression: ${step.step}`,
-        `${formatDuration(step.regression.current)} vs ${formatDuration(step.regression.baseline)} baseline p50 ` +
-          `(${formatSignedDuration(step.regression.delta)}, ${step.regression.ratio?.toFixed(2) ?? "?"}x)`,
-      );
-    }
-  }
-
-  if (report.regressions.length > 0 && values["fail-on-regression"]) {
-    process.exitCode = 1;
-  }
+  const outcome = decideTrendOutcome({
+    steps: report.steps,
+    trackedSteps: config.trend.trackedSteps,
+    baselineFetchFailures,
+    baselineRuns: report.baselineRuns,
+    failOnRegression: options.failOnRegression,
+  });
+  for (const annotation of outcome.annotations) emitAnnotation(annotation);
+  process.exitCode = outcome.exitCode;
 }
 
 function buildTrendReport(input: {
@@ -197,6 +265,7 @@ function buildTrendReport(input: {
   currentRun: WorkflowRun | null;
   currentJob: WorkflowJob;
   baselineJobs: WorkflowJob[];
+  baselineFetchFailures: number;
 }): TrendReport {
   const { config, currentJob, baselineJobs } = input;
   const currentSteps = stepDurationsMs(currentJob);
@@ -205,14 +274,14 @@ function buildTrendReport(input: {
   const trackedNames = [...config.trend.trackedSteps, TOTAL_JOB_LABEL];
   const steps: StepTrend[] = trackedNames.map((step) => {
     const currentMs =
-      step === TOTAL_JOB_LABEL ? jobDurationMs(currentJob) : (currentSteps[step] ?? null);
+      step === TOTAL_JOB_LABEL ? jobDurationMs(currentJob) : (currentSteps.get(step) ?? null);
     const samples =
       step === TOTAL_JOB_LABEL
         ? baselineJobs
             .map(jobDurationMs)
             .filter((ms): ms is number => ms !== null)
         : baselineSteps
-            .map((durations) => durations[step])
+            .map((durations) => durations.get(step))
             .filter((ms): ms is number => ms !== undefined);
 
     const baseline = samples.length >= MIN_BASELINE_SAMPLES ? summarizeDurations(samples) : null;
@@ -236,6 +305,7 @@ function buildTrendReport(input: {
     job: input.job,
     baselineBranch: input.branch,
     baselineRuns: baselineJobs.length,
+    baselineFetchFailures: input.baselineFetchFailures,
     currentRun: input.currentRun
       ? { id: input.currentRun.id, sha: input.currentRun.head_sha, url: input.currentRun.html_url }
       : null,
@@ -260,10 +330,14 @@ function renderReport(report: TrendReport, reportPath: string): string {
   const lines = [
     `### ⏱️ CI timing trend — \`${report.job}\` job of \`${report.workflow}\``,
     "",
-    report.baselineRuns >= MIN_BASELINE_SAMPLES
+    (report.baselineRuns >= MIN_BASELINE_SAMPLES
       ? `Baseline: last ${report.baselineRuns} successful runs on \`${report.baselineBranch}\`.`
       : `Baseline: only ${report.baselineRuns} comparable run(s) on \`${report.baselineBranch}\` so far — ` +
-        `need ${MIN_BASELINE_SAMPLES} before deltas are meaningful.`,
+        `need ${MIN_BASELINE_SAMPLES} before deltas are meaningful.`) +
+      (report.baselineFetchFailures > 0
+        ? ` ⚠️ ${report.baselineFetchFailures} run(s) could not be fetched from the GitHub API, ` +
+          `so the baseline is that much shorter than it should be.`
+        : ""),
     "",
     renderMarkdownTable(
       ["Step", "This run", "p50", "p90", "max", "Δ vs p50", "Status"],
@@ -318,9 +392,11 @@ async function fetchSuccessfulRuns(input: {
 }): Promise<WorkflowRun[]> {
   const { repo, workflow, branch, perPage, token } = input;
   // `per_page + 1` because the current run is filtered out of the baseline.
+  // `repo` is not encoded — it is a validated `owner/name` slug and its slash is
+  // a real path separator.
   const url =
     `${API_ROOT}/repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs` +
-    `?branch=${encodeURIComponent(branch)}&status=success&per_page=${Math.min(perPage + 1, 100)}`;
+    `?branch=${encodeURIComponent(branch)}&status=success&per_page=${Math.min(perPage + 1, MAX_HISTORY_RUNS)}`;
   const body = await apiGet<{ workflow_runs?: WorkflowRun[] }>(url, token);
   return body.workflow_runs ?? [];
 }
@@ -376,25 +452,11 @@ async function writeReport(report: TrendReport, metricsDir: string): Promise<str
   return path.relative(ROOT, reportPath);
 }
 
-function annotate(level: "warning" | "error", title: string, message: string): void {
-  if (process.env.GITHUB_ACTIONS === "true") {
-    console.log(`::${level} title=${title}::${message}`);
-  } else {
-    console.log(`${level === "error" ? "ERROR" : "WARN"}: ${title} — ${message}`);
-  }
-}
-
 function skip(reason: string): void {
   console.log(`> build-perf-report skipped: ${reason}`);
   if (process.env.GITHUB_ACTIONS === "true") {
     console.log(`::notice title=CI timing trend skipped::${reason}`);
   }
-}
-
-async function appendStepSummary(markdown: string): Promise<void> {
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (!summaryPath) return;
-  await appendFile(summaryPath, `${markdown}\n\n`);
 }
 
 main().catch((error) => {

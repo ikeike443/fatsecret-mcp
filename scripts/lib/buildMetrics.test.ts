@@ -220,7 +220,12 @@ describe("durationMs / stepDurationsMs / jobDurationMs", () => {
   };
 
   it("extracts step and job durations from the GitHub Actions payload", () => {
-    expect(stepDurationsMs(job)).toEqual({ "Install dependencies": 9_000, Build: 10_000 });
+    expect(stepDurationsMs(job)).toEqual(
+      new Map([
+        ["Install dependencies", 9_000],
+        ["Build", 10_000],
+      ]),
+    );
     expect(jobDurationMs(job)).toBe(35_000);
   });
 
@@ -233,7 +238,21 @@ describe("durationMs / stepDurationsMs / jobDurationMs", () => {
           { name: "Build", started_at: "2026-08-22T05:00:20Z", completed_at: "2026-08-22T05:00:25Z" },
         ],
       }),
-    ).toEqual({ Build: 15_000 });
+    ).toEqual(new Map([["Build", 15_000]]));
+  });
+
+  it("keeps a step named after an Object prototype key readable", () => {
+    // A plain object keyed by step name would answer with the prototype's
+    // `constructor` instead of a duration here.
+    const durations = stepDurationsMs({
+      name: "test",
+      steps: [
+        { name: "__proto__", started_at: "2026-08-22T05:00:00Z", completed_at: "2026-08-22T05:00:04Z" },
+        { name: "constructor", started_at: "2026-08-22T05:00:04Z", completed_at: "2026-08-22T05:00:06Z" },
+      ],
+    });
+    expect(durations.get("__proto__")).toBe(4_000);
+    expect(durations.get("constructor")).toBe(2_000);
   });
 
   it("returns null for missing, unparseable or reversed timestamps", () => {

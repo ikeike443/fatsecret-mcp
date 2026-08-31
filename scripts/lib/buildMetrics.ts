@@ -257,13 +257,17 @@ export function durationMs(
  * Per-step durations for one GitHub Actions job. Steps without usable
  * timestamps (skipped, still running) are omitted; a name that appears more
  * than once is summed, since that is the same logical work running twice.
+ *
+ * A `Map` rather than an object because the keys are arbitrary step names from
+ * the API: a step called `__proto__` or `constructor` would otherwise read back
+ * as something other than its duration.
  */
-export function stepDurationsMs(job: WorkflowJob): Record<string, number> {
-  const durations: Record<string, number> = {};
+export function stepDurationsMs(job: WorkflowJob): Map<string, number> {
+  const durations = new Map<string, number>();
   for (const step of job.steps ?? []) {
     const ms = durationMs(step.started_at, step.completed_at);
     if (ms === null) continue;
-    durations[step.name] = (durations[step.name] ?? 0) + ms;
+    durations.set(step.name, (durations.get(step.name) ?? 0) + ms);
   }
   return durations;
 }
