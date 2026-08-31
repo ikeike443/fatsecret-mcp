@@ -10,13 +10,14 @@
 //     artifact, so a run's timings survive log expiry)
 //   - a Markdown table in the GitHub Actions step summary
 //   - a non-zero exit code when the build blows its budget (use --warn-only to
-//     report without failing)
+//     report without failing — CI does, and enforces the same budgets after the
+//     E2E tests instead, via scripts/check-build-budget.ts)
 //
 // Per-phase timings come from Next.js' own build trace (.next/trace,
 // .next/trace-build), so a slowdown can be attributed to Turbopack compilation
 // vs. type checking vs. static generation instead of just "the build".
 import { spawn } from "node:child_process";
-import { readFile, writeFile, mkdir, appendFile, stat, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, stat, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -33,8 +34,11 @@ import {
   statusIcon,
   type BudgetEvaluation,
   type BuildPhase,
+  type BuildPhaseSummary,
 } from "./lib/buildMetrics";
 import { loadBuildPerfConfig } from "./lib/buildPerfConfig";
+import { decideBuildOutcome } from "./lib/buildPerfOutcomes";
+import { appendStepSummary, emitAnnotation } from "./lib/githubActions";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 
@@ -65,7 +69,11 @@ interface BuildMetrics {
     serverBytes: number;
     staticBytes: number;
   };
-  budgets: { duration: BudgetEvaluation; artifactSize: BudgetEvaluation };
+  budgets: {
+    duration: BudgetEvaluation;
+    artifactSize: BudgetEvaluation;
+    cacheSize: BudgetEvaluation;
+  };
 }
 
 async function main(): Promise<void> {
@@ -116,7 +124,10 @@ async function main(): Promise<void> {
     directorySize(nextDir, { exclude: [cacheDir] }),
     directorySize(path.join(nextDir, "server")),
     directorySize(path.join(nextDir, "static")),
-    readBuildPhases(nextDir),
+    // A failed build may not have flushed a trace, and the previous build's
+    // trace is still on disk — reporting that as this build's breakdown would be
+    // a lie, so a failed build gets no phase breakdown at all.
+    exitCode === 0 ? readBuildPhases(nextDir) : Promise.resolve(EMPTY_PHASE_SUMMARY),
   ]);
 
   const durationBudget = evaluateBudget(
@@ -127,6 +138,11 @@ async function main(): Promise<void> {
   const artifactBudget = evaluateBudget(
     outputBytes,
     config.build.artifactBudgetBytes,
+    config.build.warnRatio,
+  );
+  const cacheBudget = evaluateBudget(
+    cacheBytesAfter,
+    config.build.cacheBudgetBytes,
     config.build.warnRatio,
   );
 
@@ -159,7 +175,7 @@ async function main(): Promise<void> {
     cache: { state: cacheState, bytesBefore: cacheBytesBefore, bytesAfter: cacheBytesAfter },
     duration: { wallMs, tracedTotalMs: phaseSummary.totalMs, phases: phaseSummary.phases },
     artifacts: { outputBytes, serverBytes, staticBytes },
-    budgets: { duration: durationBudget, artifactSize: artifactBudget },
+    budgets: { duration: durationBudget, artifactSize: artifactBudget, cacheSize: cacheBudget },
   };
 
   const metricsPath = await writeMetrics(metrics, values["metrics-dir"]);
@@ -167,37 +183,24 @@ async function main(): Promise<void> {
   console.log(`\n${report}`);
   if (!values["no-summary"]) await appendStepSummary(report);
 
+  const outcome = decideBuildOutcome({
+    buildSucceeded: exitCode === 0,
+    cacheState,
+    ci: process.env.CI === "true",
+    warnOnly: values["warn-only"] === true,
+    durationBudget,
+    artifactBudget,
+    cacheBudget,
+  });
+  for (const annotation of outcome.annotations) emitAnnotation(annotation);
+
   if (exitCode !== 0) {
     // The build itself failed; its own output already explains why.
     process.exitCode = exitCode;
     return;
   }
-
-  for (const [label, budget] of [
-    ["Build duration", durationBudget],
-    ["Build output size", artifactBudget],
-  ] as const) {
-    if (budget.status === "over") {
-      // In --warn-only mode the breach does not fail the run, so it is annotated
-      // as a warning rather than claiming an error that never happened.
-      annotate(
-        values["warn-only"] ? "warning" : "error",
-        label,
-        describeBreach(label, budget, cacheState),
-      );
-    } else if (budget.status === "warn") {
-      annotate("warning", label, describeBreach(label, budget, cacheState));
-    }
-  }
-
-  const overBudget = durationBudget.status === "over" || artifactBudget.status === "over";
-  if (overBudget && !values["warn-only"]) {
-    console.error(
-      "\nBuild performance budget exceeded. Either optimize the build or raise the " +
-        "budget in build-perf.config.json deliberately (see README's 'Build performance').",
-    );
-    process.exitCode = 1;
-  }
+  if (outcome.failureMessage) console.error(`\n${outcome.failureMessage}`);
+  process.exitCode = outcome.exitCode;
 }
 
 function runNextBuild(): Promise<number> {
@@ -223,6 +226,8 @@ function runNextBuild(): Promise<number> {
     });
   });
 }
+
+const EMPTY_PHASE_SUMMARY: BuildPhaseSummary = { totalMs: null, phases: [], rootTags: {} };
 
 async function readBuildPhases(nextDir: string) {
   // Next.js splits its trace: `.next/trace-build` holds the root `next-build`
@@ -338,8 +343,8 @@ function renderReport(metrics: BuildMetrics, metricsPath: string): string {
       [
         "Turbopack cache (`.next/cache`)",
         `${formatBytes(cache.bytesBefore)} → ${formatBytes(cache.bytesAfter)}`,
-        "—",
-        cache.state === "warm" ? "♻️ reused" : "🧊 cold",
+        formatBytes(budgets.cacheSize.budget),
+        `${cache.state === "warm" ? "♻️ reused" : "🧊 cold"} · ${formatPercent(budgets.cacheSize.ratio)} of budget`,
       ],
     ],
   );
@@ -374,28 +379,6 @@ function renderReport(metrics: BuildMetrics, metricsPath: string): string {
     `Metrics: \`${metricsPath}\` · node ${metrics.env.node} · next ${metrics.env.next ?? "?"} · ${metrics.env.cpus} CPUs`,
   );
   return sections.join("\n");
-}
-
-function describeBreach(label: string, budget: BudgetEvaluation, cacheState: string): string {
-  const isDuration = label === "Build duration";
-  const actual = isDuration ? formatDuration(budget.actual) : formatBytes(budget.actual);
-  const limit = isDuration ? formatDuration(budget.budget) : formatBytes(budget.budget);
-  const suffix = isDuration ? ` (${cacheState} cache)` : "";
-  return `${actual} vs ${limit} budget${suffix} — ${formatPercent(budget.ratio)} of budget`;
-}
-
-function annotate(level: "warning" | "error", title: string, message: string): void {
-  if (process.env.GITHUB_ACTIONS === "true") {
-    console.log(`::${level} title=${title}::${message}`);
-  } else {
-    console.log(`${level === "error" ? "ERROR" : "WARN"}: ${title} — ${message}`);
-  }
-}
-
-async function appendStepSummary(markdown: string): Promise<void> {
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (!summaryPath) return;
-  await appendFile(summaryPath, `${markdown}\n\n`);
 }
 
 main().catch((error) => {
