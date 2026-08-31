@@ -20,6 +20,9 @@ jobs:
 
       - run: npm run lint
 
+      - name: Dead code / unused exports / unused dependencies
+        run: npm run knip
+
       - name: Type check
         run: npx tsc --noEmit
 

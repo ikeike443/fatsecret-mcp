@@ -176,6 +176,19 @@ derive "fatsecret-mcp:oauth-client-secret" # → OAUTH_CLIENT_SECRET
 
 The label strings aren't secret (they're safe to keep in this README) — only the passphrase is. Running `derive` again with the same passphrase always reproduces the same values. This does **not** apply to the FatSecret-side credentials (`FATSECRET_CLIENT_ID/SECRET`, `FATSECRET_CONSUMER_KEY/SECRET`, `FATSECRET_ACCESS_TOKEN/SECRET`) — those come from FatSecret's developer console and the OAuth1 setup script, not from this passphrase.
 
+## Static analysis
+
+Two gates, both run in CI before the tests and both failing the build on a
+regression (not just warning):
+
+```bash
+npm run lint        # eslint, incl. cyclomatic complexity budgets (see below)
+npm run knip        # unused files, unused exports, unused dependencies
+```
+
+- **Complexity budgets** (`eslint.config.mjs`): `complexity` is an `error`, because `npm run lint` runs bare `eslint`, which exits 0 on warnings. Route handlers under `app/` get a ceiling of 15 and everything in `lib/`/`scripts/` gets 10. The split is deliberate: `/api/oauth/token`'s `POST` is at 14 because each rejected branch reports its own security event (see "Security event logging & alerting" above), and collapsing those branches to lower the number would erase the audit trail they exist to produce. `lib/`'s current maximum is `describeErrorChain` in `lib/fatsecret/appAuth.ts` at 10.
+- **Dead code** (`knip.json`): entry points are auto-detected from the Next.js App Router, the `test`/`test:e2e` scripts, and `fatsecret:oauth-setup`, so any module or export that nothing reaches is reported. `includeEntryExports` is on, which also catches unused exports inside entry files themselves — a plain `export` in a `route.ts` that no one imports still gets flagged. This doubles as the unused-dependency check, so a package that stops being imported fails CI instead of lingering in `package.json`.
+
 ## Testing
 
 Three layers, all run in CI (`.github/workflows/ci.yml`) on every push/PR — none require real FatSecret secrets, so they work the same in a public repo:
