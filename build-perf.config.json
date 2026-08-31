@@ -1,11 +1,12 @@
 {
-  "$comment": "Build-performance budgets and CI-timing thresholds. See README's 'Build performance' section. Budgets are wall-clock `next build` times with generous headroom over what a GitHub-hosted runner actually needs (~10s), so they catch a real regression without failing on a slow runner.",
+  "$comment": "Build-performance budgets and CI-timing thresholds. See README's 'Build performance' section. Budgets are wall-clock `next build` times set at roughly 2.5-3x what a GitHub-hosted runner actually needs (~10.5s cold, ~4s warm), so they absorb runner variance but still catch a real regression instead of only a catastrophic one.",
   "build": {
-    "coldBudgetMs": 45000,
-    "warmBudgetMs": 30000,
+    "coldBudgetMs": 25000,
+    "warmBudgetMs": 12000,
     "warnRatio": 0.85,
     "artifactBudgetBytes": 26214400,
-    "warmCacheMinBytes": 1048576
+    "warmCacheMinBytes": 1048576,
+    "cacheBudgetBytes": 268435456
   },
   "trend": {
     "workflow": "ci.yml",
@@ -22,6 +23,6 @@
       "E2E tests"
     ],
     "regressionRatio": 1.5,
-    "minRegressionDeltaMs": 15000
+    "minRegressionDeltaMs": 2500
   }
 }
