@@ -23,8 +23,11 @@ jobs:
       # (experimental.turbopackFileSystemCacheForBuild in next.config.ts), so
       # restoring that directory is what makes the CI build warm instead of cold.
       # Keyed on the lockfile plus the sources that invalidate compilation; the
-      # restore-keys fall back to the nearest earlier cache so a one-line source
-      # change still reuses most of the previous build's work.
+      # restore-key falls back to the nearest earlier cache for the same lockfile,
+      # so a one-line source change still reuses most of the previous build's
+      # work. There is deliberately no lockfile-independent fallback: a cache
+      # built against a different Next.js version is exactly the case where the
+      # build should start cold.
       - name: Restore Next.js build cache
         uses: actions/cache@v4
         with:
@@ -34,7 +37,6 @@ jobs:
             hashFiles('app/**/*.ts', 'app/**/*.tsx', 'lib/**/*.ts', 'next.config.ts', 'tsconfig.json') }}
           restore-keys: |
             ${{ runner.os }}-node22-nextcache-${{ hashFiles('package-lock.json') }}-
-            ${{ runner.os }}-node22-nextcache-
 
       # Step names are deliberately stable and match trend.trackedSteps in
       # build-perf.config.json — build-perf-report.ts looks steps up by name when
@@ -53,12 +55,18 @@ jobs:
 
       # Wraps `next build` with timing, Next.js build-trace phase breakdown,
       # output-size measurement and the budgets in build-perf.config.json.
+      # --warn-only here on purpose: the budgets are enforced after the E2E tests
+      # below, so a slow build cannot stop a correctness check from running.
       - name: Build
-        run: npm run build:measure
+        run: npm run build:measure -- --warn-only
 
       # Real HTTP server against the production build; no external secrets required.
       - name: E2E tests
         run: npm run test:e2e
+
+      # Fails the job if the build blew a budget the step above only warned about.
+      - name: Build performance budget
+        run: npm run build:budget-check
 
       - name: Upload build metrics
         if: always()
@@ -78,6 +86,9 @@ jobs:
   # fails the build on its own.
   build-perf-trend:
     needs: test
+    # Runs even when `test` failed: a red run is exactly when its step timings are
+    # worth seeing (a budget breach, a build that suddenly got slow).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -93,7 +104,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The script already downgrades every GitHub API failure to a warning;
+      # continue-on-error is the belt-and-braces version of the same promise, so
+      # an unexpected crash in a read-only report cannot turn the run red either.
       - name: CI timing trend report
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build:perf-report
