@@ -13,6 +13,10 @@
 # testing
 /coverage
 
+# build-performance metrics written by `npm run build:measure` /
+# `npm run build:perf-report` (uploaded as a CI artifact, never committed)
+/.build-metrics/
+
 # next.js
 /.next/
 /out/

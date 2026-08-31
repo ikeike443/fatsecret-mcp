@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,9 +19,31 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      # Turbopack persists its compiler artifacts in .next/cache
+      # (experimental.turbopackFileSystemCacheForBuild in next.config.ts), so
+      # restoring that directory is what makes the CI build warm instead of cold.
+      # Keyed on the lockfile plus the sources that invalidate compilation; the
+      # restore-keys fall back to the nearest earlier cache so a one-line source
+      # change still reuses most of the previous build's work.
+      - name: Restore Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: >-
+            ${{ runner.os }}-node22-nextcache-${{ hashFiles('package-lock.json') }}-${{
+            hashFiles('app/**/*.ts', 'app/**/*.tsx', 'lib/**/*.ts', 'next.config.ts', 'tsconfig.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node22-nextcache-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-node22-nextcache-
 
-      - run: npm run lint
+      # Step names are deliberately stable and match trend.trackedSteps in
+      # build-perf.config.json — build-perf-report.ts looks steps up by name when
+      # comparing this run against the recent history of runs on main.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
 
       - name: Type check
         run: npx tsc --noEmit
@@ -26,8 +51,55 @@ jobs:
       - name: Unit + integration tests
         run: npm run test
 
+      # Wraps `next build` with timing, Next.js build-trace phase breakdown,
+      # output-size measurement and the budgets in build-perf.config.json.
       - name: Build
-        run: npm run build
+        run: npm run build:measure
 
-      - name: E2E tests (real HTTP server, no external secrets required)
+      # Real HTTP server against the production build; no external secrets required.
+      - name: E2E tests
         run: npm run test:e2e
+
+      - name: Upload build metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metrics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build-metrics/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Turns CI step timings into a tracked trend instead of an anecdote: compares
+  # this run's steps against the p50/p90 of recent successful runs on main and
+  # warns when one got substantially slower. Read-only, warn-only — it never
+  # fails the build on its own.
+  build-perf-trend:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: CI timing trend report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build:perf-report
+
+      - name: Upload timing trend report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-timing-trend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build-metrics/ci-timing-trend.json
+          if-no-files-found: warn
+          retention-days: 30

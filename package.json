@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:measure": "tsx scripts/measure-build.ts",
+    "build:perf-report": "tsx scripts/build-perf-report.ts",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run --exclude '**/e2e/**'",

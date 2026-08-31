@@ -1,0 +1,27 @@
+{
+  "$comment": "Build-performance budgets and CI-timing thresholds. See README's 'Build performance' section. Budgets are wall-clock `next build` times with generous headroom over what a GitHub-hosted runner actually needs (~10s), so they catch a real regression without failing on a slow runner.",
+  "build": {
+    "coldBudgetMs": 45000,
+    "warmBudgetMs": 30000,
+    "warnRatio": 0.85,
+    "artifactBudgetBytes": 26214400,
+    "warmCacheMinBytes": 1048576
+  },
+  "trend": {
+    "workflow": "ci.yml",
+    "job": "test",
+    "baselineBranch": "main",
+    "historyRuns": 20,
+    "trackedSteps": [
+      "Restore Next.js build cache",
+      "Install dependencies",
+      "Lint",
+      "Type check",
+      "Unit + integration tests",
+      "Build",
+      "E2E tests"
+    ],
+    "regressionRatio": 1.5,
+    "minRegressionDeltaMs": 15000
+  }
+}
