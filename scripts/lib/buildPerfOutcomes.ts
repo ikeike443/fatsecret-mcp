@@ -80,7 +80,12 @@ export function decideBuildOutcome(input: BuildOutcomeInput): BuildOutcome {
       // as a warning rather than claiming an error that never happened.
       level: budget.status === "over" && !input.warnOnly ? "error" : "warning",
       title,
-      message: describeBudget(budget, { unit, cacheState: unit === "duration" ? input.cacheState : undefined }),
+      message: describeBudget(budget, {
+        unit,
+        // Which duration budget applied depends on the cache state, so a duration
+        // breach is meaningless without it.
+        cacheState: unit === "duration" ? input.cacheState : undefined,
+      }),
     });
   }
 
