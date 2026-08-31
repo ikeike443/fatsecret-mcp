@@ -66,6 +66,9 @@ jobs:
         with:
           name: build-metrics-${{ github.run_id }}-${{ github.run_attempt }}
           path: .build-metrics/
+          # .build-metrics is a dot-directory, and upload-artifact skips hidden
+          # paths by default — without this the artifact comes out empty.
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
 
@@ -101,5 +104,6 @@ jobs:
         with:
           name: ci-timing-trend-${{ github.run_id }}-${{ github.run_attempt }}
           path: .build-metrics/ci-timing-trend.json
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
