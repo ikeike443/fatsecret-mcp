@@ -176,6 +176,21 @@ derive "fatsecret-mcp:oauth-client-secret" # → OAUTH_CLIENT_SECRET
 
 The label strings aren't secret (they're safe to keep in this README) — only the passphrase is. Running `derive` again with the same passphrase always reproduces the same values. This does **not** apply to the FatSecret-side credentials (`FATSECRET_CLIENT_ID/SECRET`, `FATSECRET_CONSUMER_KEY/SECRET`, `FATSECRET_ACCESS_TOKEN/SECRET`) — those come from FatSecret's developer console and the OAuth1 setup script, not from this passphrase.
 
+## Static analysis
+
+Two gates, both run in CI before the tests and both failing the build on a
+regression (not just warning):
+
+```bash
+npm run lint        # eslint, incl. cyclomatic complexity budgets (see below)
+npm run knip        # unused files, unused exports, unused dependencies
+```
+
+- **Complexity budgets** (`eslint.config.mjs`): `complexity` is an `error`, because `npm run lint` runs bare `eslint`, which exits 0 on warnings. Two tiers: `lib/**/*.ts` and `scripts/**/*.ts` get a ceiling of **12**, and *everything else* gets **14** — the first config block is deliberately unscoped, so `app/`, `test/` and the root config files (`eslint.config.mjs`, `vitest.config.mts`, `next.config.ts`) are all covered too rather than left unbudgeted. Both numbers are the current measured maximum in that scope **+ 2**: an intentional ratchet with just enough slack that a routine edit doesn't trip the gate. Re-measure with `npx eslint --rule '{"complexity":["error",{"max":1}]}'` and re-tighten when the maxima move.
+  - Current maxima: `/api/oauth/authorize`'s `GET` at 12, then `/api/oauth/token`'s `POST` and `describeErrorChain` (`lib/fatsecret/appAuth.ts`) at 10. `GET` is what justifies the looser tier: each of its rejected branches reports a *distinct* security event (see "Security event logging & alerting" above), so collapsing them would erase the audit trail they exist to produce. That argument does **not** stretch to the five-field presence check in `POST`, which emits a single event — it lives in `readRequiredFields` instead, which is why `POST` is at 10 and not 14.
+- **Dead code** (`knip.json`): knip runs on its defaults — the config file only pins the `$schema`. Entry points are auto-detected by knip's Next.js / Node.js / Vitest / tsx plugins (App Router `page`/`layout`/`route` files, `next.config.ts`, `vitest.config.mts`, `test/**`, `scripts/fatsecret-oauth-setup.ts`), so an orphaned module — anywhere in the repo, any of `.js/.mjs/.cjs/.jsx/.ts/.tsx/.mts/.cts` — is reported as an unused file, and an unused `export` in any non-entry module is reported too. This doubles as the unused-dependency check, so a package that stops being imported fails CI instead of lingering in `package.json`.
+  - Known blind spot: unused exports *inside entry files themselves* are **not** caught. Every entry path here is contributed by a plugin, and knip registers plugin-supplied entries with export analysis switched off (`skipExportsAnalysis`), upstream of the gate `includeEntryExports` controls. So a stray `export const foo = 1` in a `route.ts` or in `next.config.ts` goes unreported, and setting `includeEntryExports` (or passing `--include-entry-exports`) does not change that. It is left out of the config rather than kept as a decorative no-op.
+
 ## Testing
 
 Three layers, all run in CI (`.github/workflows/ci.yml`) on every push/PR — none require real FatSecret secrets, so they work the same in a public repo:

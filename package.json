@@ -11,6 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "knip": "knip",
     "test": "vitest run --exclude '**/e2e/**'",
     "test:watch": "vitest --exclude '**/e2e/**'",
     "test:e2e": "node --test test/e2e/*.test.mjs",
@@ -31,6 +32,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "knip": "^6.33.0",
     "tsx": "^4.19.2",
     "typescript": "^5",
     "vitest": "^4.1.10"

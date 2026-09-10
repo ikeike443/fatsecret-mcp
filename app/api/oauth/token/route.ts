@@ -24,6 +24,33 @@ async function readParams(req: Request): Promise<URLSearchParams> {
   return params;
 }
 
+type RequiredTokenFields = {
+  code: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  codeVerifier: string;
+};
+
+// Returns all five required fields together, or null if any is missing/empty.
+// Returning the whole object rather than reporting *which* field was missing is
+// deliberate: the single "invalid_request" response and single audit event below
+// are what an OAuth client is entitled to see, and this shape is what keeps
+// TypeScript narrowing every field to `string` at the call site (a
+// `[...].some(v => !v)` presence check compiles but loses the narrowing).
+function readRequiredFields(params: URLSearchParams): RequiredTokenFields | null {
+  const code = params.get("code");
+  const clientId = params.get("client_id");
+  const clientSecret = params.get("client_secret");
+  const redirectUri = params.get("redirect_uri");
+  const codeVerifier = params.get("code_verifier");
+
+  if (!code || !clientId || !clientSecret || !redirectUri || !codeVerifier) {
+    return null;
+  }
+  return { code, clientId, clientSecret, redirectUri, codeVerifier };
+}
+
 export async function POST(req: Request) {
   let params: URLSearchParams;
   try {
@@ -39,16 +66,12 @@ export async function POST(req: Request) {
     return jsonError("unsupported_grant_type");
   }
 
-  const code = params.get("code");
-  const clientId = params.get("client_id");
-  const clientSecret = params.get("client_secret");
-  const redirectUri = params.get("redirect_uri");
-  const codeVerifier = params.get("code_verifier");
-
-  if (!code || !clientId || !clientSecret || !redirectUri || !codeVerifier) {
+  const fields = readRequiredFields(params);
+  if (!fields) {
     reportSecurityFailure(req, "oauth_token_failure", "invalid_request_missing_fields");
     return jsonError("invalid_request");
   }
+  const { code, clientId, clientSecret, redirectUri, codeVerifier } = fields;
 
   if (!verifyClientCredentials(clientId, clientSecret)) {
     // The one check in this whole flow that most directly gates on a

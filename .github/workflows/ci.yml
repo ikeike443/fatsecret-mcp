@@ -20,6 +20,9 @@ jobs:
 
       - run: npm run lint
 
+      - name: Dead code detection (knip)
+        run: npm run knip
+
       - name: Type check
         run: npx tsc --noEmit
 
