@@ -9,6 +9,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:measure": "tsx scripts/measure-build.ts",
+    "build:budget-check": "tsx scripts/check-build-budget.ts",
+    "build:perf-report": "tsx scripts/build-perf-report.ts",
     "start": "next start",
     "lint": "eslint",
     "knip": "knip",

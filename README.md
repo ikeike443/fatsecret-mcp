@@ -198,7 +198,7 @@ Three layers, all run in CI (`.github/workflows/ci.yml`) on every push/PR — no
 ```bash
 npm run test        # unit + integration (vitest) — pure logic, plus the real Next.js
                      # route handler exercised with fetch mocked
-npm run build
+npm run build        # CI runs `npm run build:measure` instead — see "Build performance" below
 npm run test:e2e     # starts a real `next start` server and hits it over real HTTP
                       # (node's built-in test runner, no extra dependency)
 ```
@@ -206,6 +206,48 @@ npm run test:e2e     # starts a real `next start` server and hits it over real H
 - **Unit** (`lib/**/*.test.ts`): bearer-token verification, OAuth2.1 code signing/PKCE/redirect-URI allowlisting (RFC 7636 test vector included), FatSecret OAuth2 Client Credentials token fetch/cache/refresh (`lib/fatsecret/appAuth.test.ts`), OAuth1 HMAC-SHA1 signing cross-checked against an independent reimplementation (`lib/fatsecret/oauth1.test.ts`), and every `lib/fatsecret/*.ts` response-shape normalization (single-object-vs-array, numeric-string-vs-number, empty-response quirks).
 - **Integration** (`test/integration/*.test.ts`): the real `app/api/mcp/route.ts` handler wired to the real `lib/fatsecret/*` modules with only `fetch` mocked, covering both the OAuth2 (Signed Request) and OAuth1 (Signed & Delegated) tool paths, and confirm-gating on every write tool; the real `/api/oauth/authorize`/`/api/oauth/token` routes; the `.well-known` OAuth metadata routes.
 - **E2E** (`test/e2e/*.e2e.test.mjs`): boots the production build and asserts over real HTTP — health check, 401 on bad/missing auth, `tools/list` returns all 17 tools, OAuth discovery metadata, and a full authorization-code + PKCE round trip. Doesn't exercise real FatSecret data (CI has no real credentials by design).
+
+### Build performance
+
+Build duration is measured on every CI run and graded against committed budgets, so a build that gets slower is a visible number rather than a vague feeling that CI drags:
+
+```bash
+npm run build              # plain `next build`
+npm run build:measure      # what CI runs: `next build` + timing, phase breakdown, budgets
+npm run build:budget-check # grade the last measured build; CI runs it after the E2E tests
+npm run build:perf-report  # compare recent CI runs' step timings (needs a GitHub token)
+```
+
+**`npm run build:measure`** (`scripts/measure-build.ts`) wraps `next build` and reports:
+
+- wall-clock duration, graded against `build-perf.config.json` — separate budgets for a **cold** and a **warm** build, since Turbopack reuses `.next/cache` between runs. Over budget exits non-zero (`--warn-only` to report without failing); within `warnRatio` of it is a warning, so budgets get raised deliberately instead of after a surprise red build. A **cold** build in CI is also a warning in its own right: it means the cache-restore step didn't work, and the build is being graded against the looser of the two budgets.
+- **where the time went**, from Next.js' own build trace (`.next/trace`, `.next/trace-build`): `run-turbopack`, `run-typescript`, `static-generation`, … Phases can overlap (compilation and type checking run concurrently), so shares don't sum to 100%. Skipped when the build failed, because the trace on disk may still be the previous build's.
+- output size (`.next` minus the cache), also budgeted, to catch bundle bloat.
+- whether the Turbopack cache was reused, how much it grew, and how close it is to `build.cacheBudgetBytes`.
+
+Results are written to `.build-metrics/` (gitignored) and rendered into the GitHub Actions step summary. CI uploads them as an artifact, so a run's numbers outlive its logs.
+
+CI measures the build with `--warn-only` and enforces the budgets in a separate **`npm run build:budget-check`** step (`scripts/check-build-budget.ts`) *after* the E2E tests, re-grading the metrics that were just written. That way a performance budget can still fail the run, but it can never stop a correctness check from running.
+
+**Caching** — CI restores `.next/cache` (the "Restore Next.js build cache" step), keyed on the lockfile plus the sources that invalidate compilation, with one `restore-keys` fallback to the nearest earlier cache *for the same lockfile*, so a one-line change still starts warm while a dependency bump deliberately starts cold. `next.config.ts` pins `experimental.turbopackFileSystemCacheForBuild`/`ForDev` on, because the warm budget assumes them. The cache is restored and re-saved every run and only ever grows, hence `build.cacheBudgetBytes`: when the build starts warning about it, bump the `nextcache-` key prefix in `ci.yml` to start it over.
+
+**`npm run build:perf-report`** (`scripts/build-perf-report.ts`) runs as the `build-perf-trend` CI job and uses the GitHub Actions API as the timing store: it pulls up to `trend.historyRuns` recent successful runs on `main`, computes p50/p90/max per tracked step (`trend.trackedSteps` — these names must match the step names in `ci.yml`, which `scripts/lib/buildPerfConfig.test.ts` asserts), and flags anything that is both `regressionRatio`x and `minRegressionDeltaMs` slower than the baseline p50. It also warns about the two ways it can end up measuring nothing: a tracked step that no longer exists under that name, and a baseline cut short by failed API calls.
+
+That job is a read-only observer and stays one: with no token, an unreachable API or any API error it warns and exits 0 (and the step is `continue-on-error`), so it never becomes the reason a PR is red. `--fail-on-regression` opts into the opposite — a detected regression, or a failed report, exits non-zero.
+
+Tuning any of this means editing `build-perf.config.json` — one reviewable diff:
+
+| Field | Meaning |
+|---|---|
+| `build.coldBudgetMs` / `warmBudgetMs` | wall-clock budget for a build with an empty / restored `.next/cache` — currently ~2.5x what a GitHub-hosted runner needs (~10.5s cold, ~4s warm) |
+| `build.warnRatio` | fraction of the budget at which a build is flagged but still passes |
+| `build.artifactBudgetBytes` | budget for `.next` excluding `.next/cache` |
+| `build.warmCacheMinBytes` | how much `.next/cache` counts as "warm" |
+| `build.cacheBudgetBytes` | size at which `.next/cache` itself is worth a warning |
+| `trend.trackedSteps` | CI step names compared against history |
+| `trend.regressionRatio` / `minRegressionDeltaMs` | a step must be both relatively *and* absolutely slower to count as a regression (keeps runner noise on fast steps quiet). GitHub step timestamps have 1-second granularity, so the absolute floor can't usefully go below ~2s |
+
+The helpers behind the scripts (`scripts/lib/buildMetrics.ts`, `scripts/lib/buildPerfConfig.ts`, `scripts/lib/buildPerfOutcomes.ts`) are pure and unit tested (`npm run test`) — trace parsing, percentiles, budget grading, regression detection, and the annotate/exit-code decisions that actually gate CI don't need a build to verify.
 
 ### Manually verifying against a real FatSecret account
 
