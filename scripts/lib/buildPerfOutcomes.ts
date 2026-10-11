@@ -69,6 +69,27 @@ export function decideBuildOutcome(input: BuildOutcomeInput): BuildOutcome {
     return { annotations, exitCode: 0, failureMessage: null };
   }
 
+  annotations.push(...gradeBuildBudgets(input));
+
+  if (input.cacheBudget.status !== "ok") {
+    annotations.push({
+      level: "warning",
+      title: "Turbopack cache size",
+      message:
+        `${describeBudget(input.cacheBudget, { unit: "bytes" })} — the CI cache only ever grows; ` +
+        `bump the cache key prefix in .github/workflows/ci.yml to start it over.`,
+    });
+  }
+
+  const breached =
+    input.durationBudget.status === "over" || input.artifactBudget.status === "over";
+  return breached && !input.warnOnly
+    ? { annotations, exitCode: 1, failureMessage: BUDGET_FAILURE_MESSAGE }
+    : { annotations, exitCode: 0, failureMessage: null };
+}
+
+function gradeBuildBudgets(input: BuildOutcomeInput): Annotation[] {
+  const annotations: Annotation[] = [];
   const graded = [
     { title: "Build duration", budget: input.durationBudget, unit: "duration" },
     { title: "Build output size", budget: input.artifactBudget, unit: "bytes" },
@@ -89,21 +110,7 @@ export function decideBuildOutcome(input: BuildOutcomeInput): BuildOutcome {
     });
   }
 
-  if (input.cacheBudget.status !== "ok") {
-    annotations.push({
-      level: "warning",
-      title: "Turbopack cache size",
-      message:
-        `${describeBudget(input.cacheBudget, { unit: "bytes" })} — the CI cache only ever grows; ` +
-        `bump the cache key prefix in .github/workflows/ci.yml to start it over.`,
-    });
-  }
-
-  const breached =
-    input.durationBudget.status === "over" || input.artifactBudget.status === "over";
-  return breached && !input.warnOnly
-    ? { annotations, exitCode: 1, failureMessage: BUDGET_FAILURE_MESSAGE }
-    : { annotations, exitCode: 0, failureMessage: null };
+  return annotations;
 }
 
 function describeBudget(
