@@ -113,29 +113,7 @@ async function main(): Promise<void> {
   }
 
   const config = await loadBuildPerfConfig(ROOT);
-  const historyRuns = values.limit ? Number.parseInt(values.limit, 10) : config.trend.historyRuns;
-  // The same bounds the config schema enforces: below 2 there is nothing to
-  // compare, and GitHub will not page beyond MAX_HISTORY_RUNS per request, so a
-  // larger --limit would be silently clamped instead of honoured.
-  if (!Number.isInteger(historyRuns) || historyRuns < 2 || historyRuns > MAX_HISTORY_RUNS) {
-    throw new Error(
-      `--limit must be an integer between 2 and ${MAX_HISTORY_RUNS}, got ${values.limit}`,
-    );
-  }
-  if (values.repo !== undefined && !REPO_SLUG.test(values.repo)) {
-    throw new Error(`--repo must look like owner/name, got "${values.repo}"`);
-  }
-
-  const options: ReportOptions = {
-    repo: values.repo,
-    workflow: values.workflow ?? config.trend.workflow,
-    job: values.job ?? config.trend.job,
-    branch: values.branch ?? config.trend.baselineBranch,
-    historyRuns,
-    failOnRegression: values["fail-on-regression"] === true,
-    metricsDir: values["metrics-dir"] ?? ".build-metrics",
-    noSummary: values["no-summary"] === true,
-  };
+  const options = readReportOptions(config, values);
 
   try {
     await runReport(config, options);
@@ -153,18 +131,53 @@ async function main(): Promise<void> {
   }
 }
 
+interface ReportValues {
+  repo?: string;
+  workflow?: string;
+  job?: string;
+  branch?: string;
+  limit?: string;
+  "fail-on-regression"?: boolean;
+  "metrics-dir"?: string;
+  "no-summary"?: boolean;
+}
+
+function readHistoryLimit(config: BuildPerfConfig, values: ReportValues): number {
+  const historyRuns = values.limit ? Number.parseInt(values.limit, 10) : config.trend.historyRuns;
+  // The same bounds the config schema enforces: below 2 there is nothing to
+  // compare, and GitHub will not page beyond MAX_HISTORY_RUNS per request, so a
+  // larger --limit would be silently clamped instead of honoured.
+  if (!Number.isInteger(historyRuns) || historyRuns < 2 || historyRuns > MAX_HISTORY_RUNS) {
+    throw new Error(
+      `--limit must be an integer between 2 and ${MAX_HISTORY_RUNS}, got ${values.limit}`,
+    );
+  }
+  return historyRuns;
+}
+
+function readReportOptions(config: BuildPerfConfig, values: ReportValues): ReportOptions {
+  const historyRuns = readHistoryLimit(config, values);
+  if (values.repo !== undefined && !REPO_SLUG.test(values.repo)) {
+    throw new Error(`--repo must look like owner/name, got "${values.repo}"`);
+  }
+
+  return {
+    repo: values.repo,
+    workflow: values.workflow ?? config.trend.workflow,
+    job: values.job ?? config.trend.job,
+    branch: values.branch ?? config.trend.baselineBranch,
+    historyRuns,
+    failOnRegression: values["fail-on-regression"] === true,
+    metricsDir: values["metrics-dir"] ?? ".build-metrics",
+    noSummary: values["no-summary"] === true,
+  };
+}
+
 async function runReport(config: BuildPerfConfig, options: ReportOptions): Promise<void> {
   const { workflow, job, branch, historyRuns } = options;
 
-  const repo = options.repo ?? process.env.GITHUB_REPOSITORY ?? (await repoFromGitRemote());
-  if (!repo) {
-    skip("Could not determine the repository (pass --repo owner/name).");
-    return;
-  }
-  if (!REPO_SLUG.test(repo)) {
-    skip(`"${repo}" does not look like an owner/name repository — skipping.`);
-    return;
-  }
+  const repo = await resolveReportRepo(options.repo);
+  if (!repo) return;
 
   const token = await resolveToken();
   if (!token) {
@@ -179,27 +192,9 @@ async function runReport(config: BuildPerfConfig, options: ReportOptions): Promi
   let currentJob: WorkflowJob | null;
   let currentRun: WorkflowRun | null = null;
   try {
-    baselineRuns = await fetchSuccessfulRuns({ repo, workflow, branch, perPage: historyRuns, token });
-    const currentRunId = process.env.GITHUB_RUN_ID
-      ? Number.parseInt(process.env.GITHUB_RUN_ID, 10)
-      : baselineRuns[0]?.id;
-    if (!currentRunId) {
-      skip(`No successful ${workflow} runs found for ${repo}@${branch} yet.`);
-      return;
-    }
-    currentRun = baselineRuns.find((run) => run.id === currentRunId) ?? null;
-    // One extra run is fetched so that dropping the current one still leaves
-    // `historyRuns` samples; on a PR run it is not in the list at all, so the
-    // list has to be trimmed back down to the documented size.
-    baselineRuns = baselineRuns.filter((run) => run.id !== currentRunId).slice(0, historyRuns);
-    currentJob = await fetchJob({ repo, runId: currentRunId, job, token });
-    if (!currentJob) {
-      skip(`Run ${currentRunId} has no job named "${job}" — nothing to compare.`);
-      return;
-    }
-    if (!currentRun) {
-      currentRun = { id: currentRunId, head_sha: process.env.GITHUB_SHA ?? "", head_branch: null, created_at: new Date().toISOString(), html_url: `${serverUrl()}/${repo}/actions/runs/${currentRunId}` };
-    }
+    const context = await readCurrentContext({ repo, workflow, branch, historyRuns, job, token });
+    if (!context) return;
+    ({ baselineRuns, currentJob, currentRun } = context);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       skip("GitHub API returned 401 — the token is invalid or expired; skipping.");
@@ -254,6 +249,59 @@ async function runReport(config: BuildPerfConfig, options: ReportOptions): Promi
   });
   for (const annotation of outcome.annotations) emitAnnotation(annotation);
   process.exitCode = outcome.exitCode;
+}
+
+async function resolveReportRepo(explicitRepo?: string): Promise<string | null> {
+  const repo = explicitRepo ?? process.env.GITHUB_REPOSITORY ?? (await repoFromGitRemote());
+  if (!repo) {
+    skip("Could not determine the repository (pass --repo owner/name).");
+    return null;
+  }
+  if (!REPO_SLUG.test(repo)) {
+    skip(`"${repo}" does not look like an owner/name repository — skipping.`);
+    return null;
+  }
+
+  return repo;
+}
+
+async function readCurrentContext(input: {
+  repo: string;
+  workflow: string;
+  branch: string;
+  historyRuns: number;
+  job: string;
+  token: string;
+}) {
+  const { repo, workflow, branch, historyRuns, job, token } = input;
+  let baselineRuns = await fetchSuccessfulRuns({ repo, workflow, branch, perPage: historyRuns, token });
+  const currentRunId = process.env.GITHUB_RUN_ID
+    ? Number.parseInt(process.env.GITHUB_RUN_ID, 10)
+    : baselineRuns[0]?.id;
+  if (!currentRunId) {
+    skip(`No successful ${workflow} runs found for ${repo}@${branch} yet.`);
+    return null;
+  }
+  let currentRun = baselineRuns.find((run) => run.id === currentRunId) ?? null;
+  // One extra run is fetched so that dropping the current one still leaves
+  // `historyRuns` samples; on a PR run it is not in the list at all, so the
+  // list has to be trimmed back down to the documented size.
+  baselineRuns = baselineRuns.filter((run) => run.id !== currentRunId).slice(0, historyRuns);
+  const currentJob = await fetchJob({ repo, runId: currentRunId, job, token });
+  if (!currentJob) {
+    skip(`Run ${currentRunId} has no job named "${job}" — nothing to compare.`);
+    return null;
+  }
+  if (!currentRun) {
+    currentRun = {
+      id: currentRunId,
+      head_sha: process.env.GITHUB_SHA ?? "",
+      head_branch: null,
+      created_at: new Date().toISOString(),
+      html_url: `${serverUrl()}/${repo}/actions/runs/${currentRunId}`,
+    };
+  }
+  return { baselineRuns, currentJob, currentRun };
 }
 
 function buildTrendReport(input: {
