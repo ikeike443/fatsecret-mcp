@@ -65,7 +65,7 @@ export interface RegressionCheck {
 }
 
 /** Shape of the bits of the GitHub Actions "jobs for a run" payload we use. */
-export interface WorkflowJobStep {
+interface WorkflowJobStep {
   name: string;
   started_at?: string | null;
   completed_at?: string | null;

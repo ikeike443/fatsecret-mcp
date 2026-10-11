@@ -24,8 +24,14 @@ export function workflowStepNames(workflowYaml: string, jobName: string): string
 
   const jobsIndex = lines.findIndex((line) => line.trimEnd() === "jobs:");
   if (jobsIndex === -1) throw new Error("workflowStepNames: no `jobs:` block");
+  const jobIndex = findJob(lines, jobsIndex, jobName);
+  const stepsIndex = findSteps(lines, jobIndex, jobName);
+  return readStepNames(lines, stepsIndex);
+}
 
+function findJob(lines: string[], jobsIndex: number, jobName: string): number {
   const jobIndent = indentOf(lines[jobsIndex + 1] ?? "");
+
   let jobIndex = -1;
   for (let i = jobsIndex + 1; i < lines.length; i += 1) {
     const indent = indentOf(lines[i]);
@@ -37,9 +43,13 @@ export function workflowStepNames(workflowYaml: string, jobName: string): string
   }
   if (jobIndex === -1) throw new Error(`workflowStepNames: no job named "${jobName}"`);
 
+  return jobIndex;
+}
+
+function findSteps(lines: string[], jobIndex: number, jobName: string): number {
   let stepsIndex = -1;
   for (let i = jobIndex + 1; i < lines.length; i += 1) {
-    if (indentOf(lines[i]) <= jobIndent) break;
+    if (indentOf(lines[i]) <= indentOf(lines[jobIndex])) break;
     if (lines[i].trim() === "steps:") {
       stepsIndex = i;
       break;
@@ -47,6 +57,10 @@ export function workflowStepNames(workflowYaml: string, jobName: string): string
   }
   if (stepsIndex === -1) throw new Error(`workflowStepNames: job "${jobName}" has no steps`);
 
+  return stepsIndex;
+}
+
+function readStepNames(lines: string[], stepsIndex: number): string[] {
   const names: string[] = [];
   const itemIndent = indentOf(lines[stepsIndex + 1] ?? "");
   // Indentation of a step's own keys, learned from the first one. Only those
