@@ -222,7 +222,7 @@ npm run build:perf-report  # compare recent CI runs' step timings (needs a GitHu
 
 - wall-clock duration, graded against `build-perf.config.json` — separate budgets for a **cold** and a **warm** build, since Turbopack reuses `.next/cache` between runs. Over budget exits non-zero (`--warn-only` to report without failing); within `warnRatio` of it is a warning, so budgets get raised deliberately instead of after a surprise red build. A **cold** build in CI is also a warning in its own right: it means the cache-restore step didn't work, and the build is being graded against the looser of the two budgets.
 - **where the time went**, from Next.js' own build trace (`.next/trace`, `.next/trace-build`): `run-turbopack`, `run-typescript`, `static-generation`, … Phases can overlap (compilation and type checking run concurrently), so shares don't sum to 100%. Skipped when the build failed, because the trace on disk may still be the previous build's.
-- output size (`.next` minus the cache), also budgeted, to catch bundle bloat.
+- production output size (`.next` minus `.next/cache` and `.next/dev`), also budgeted, to catch bundle bloat.
 - whether the Turbopack cache was reused, how much it grew, and how close it is to `build.cacheBudgetBytes`.
 
 Results are written to `.build-metrics/` (gitignored) and rendered into the GitHub Actions step summary. CI uploads them as an artifact, so a run's numbers outlive its logs.
