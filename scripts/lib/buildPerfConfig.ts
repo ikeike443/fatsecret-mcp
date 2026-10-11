@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
-export const CONFIG_FILENAME = "build-perf.config.json";
+const CONFIG_FILENAME = "build-perf.config.json";
 /** GitHub's per-page ceiling for the workflow-runs API, so the baseline cap too. */
 export const MAX_HISTORY_RUNS = 100;
 
@@ -48,7 +48,7 @@ const trendSchema = z.object({
   minRegressionDeltaMs: z.number().nonnegative().default(2_500),
 });
 
-export const buildPerfConfigSchema = z.object({
+const buildPerfConfigSchema = z.object({
   build: buildBudgetsSchema,
   trend: trendSchema,
 });
