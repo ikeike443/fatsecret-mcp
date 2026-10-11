@@ -121,7 +121,8 @@ async function main(): Promise<void> {
 
   const [cacheBytesAfter, outputBytes, serverBytes, staticBytes, phaseSummary] = await Promise.all([
     directorySize(cacheDir),
-    directorySize(nextDir, { exclude: [cacheDir] }),
+    // Development output can coexist with a production build, but is not deployed.
+    directorySize(nextDir, { exclude: [cacheDir, path.join(nextDir, "dev")] }),
     directorySize(path.join(nextDir, "server")),
     directorySize(path.join(nextDir, "static")),
     // A failed build may not have flushed a trace, and the previous build's
@@ -164,14 +165,7 @@ async function main(): Promise<void> {
       sha: process.env.GITHUB_SHA ?? (await gitRevParse()),
       ref: process.env.GITHUB_REF ?? null,
     },
-    ciRun: process.env.GITHUB_RUN_ID
-      ? {
-          runId: process.env.GITHUB_RUN_ID,
-          runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? "1",
-          workflow: process.env.GITHUB_WORKFLOW ?? "",
-          job: process.env.GITHUB_JOB ?? "",
-        }
-      : null,
+    ciRun: readCiRun(),
     cache: { state: cacheState, bytesBefore: cacheBytesBefore, bytesAfter: cacheBytesAfter },
     duration: { wallMs, tracedTotalMs: phaseSummary.totalMs, phases: phaseSummary.phases },
     artifacts: { outputBytes, serverBytes, staticBytes },
@@ -201,6 +195,17 @@ async function main(): Promise<void> {
   }
   if (outcome.failureMessage) console.error(`\n${outcome.failureMessage}`);
   process.exitCode = outcome.exitCode;
+}
+
+function readCiRun(): BuildMetrics["ciRun"] {
+  return process.env.GITHUB_RUN_ID
+    ? {
+        runId: process.env.GITHUB_RUN_ID,
+        runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? "1",
+        workflow: process.env.GITHUB_WORKFLOW ?? "",
+        job: process.env.GITHUB_JOB ?? "",
+      }
+    : null;
 }
 
 function runNextBuild(): Promise<number> {
@@ -335,7 +340,7 @@ function renderReport(metrics: BuildMetrics, metricsPath: string): string {
         "—",
       ],
       [
-        "Output size (`.next` minus cache)",
+        "Production output size (`.next` minus cache and dev)",
         formatBytes(artifacts.outputBytes),
         formatBytes(budgets.artifactSize.budget),
         `${statusIcon(budgets.artifactSize.status)} ${formatPercent(budgets.artifactSize.ratio)} of budget`,

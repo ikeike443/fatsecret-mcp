@@ -5,8 +5,14 @@ import {
 } from "@/lib/oauth";
 import { reportSecurityFailure } from "@/lib/securityAlert";
 
+// RFC 6749 section 5.1: token responses must not be stored by clients or proxies.
+const TOKEN_RESPONSE_HEADERS = {
+  "Cache-Control": "no-store",
+  Pragma: "no-cache",
+};
+
 function jsonError(error: string, status = 400) {
-  return Response.json({ error }, { status });
+  return Response.json({ error }, { status, headers: TOKEN_RESPONSE_HEADERS });
 }
 
 async function readParams(req: Request): Promise<URLSearchParams> {
@@ -102,8 +108,8 @@ export async function POST(req: Request) {
     return jsonError("server_error", 500);
   }
 
-  return Response.json({
-    access_token: accessToken,
-    token_type: "Bearer",
-  });
+  return Response.json(
+    { access_token: accessToken, token_type: "Bearer" },
+    { headers: TOKEN_RESPONSE_HEADERS }
+  );
 }
